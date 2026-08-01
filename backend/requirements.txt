@@ -1,0 +1,27 @@
+# --- Web framework -----------------------------------------------------------
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# --- Database ----------------------------------------------------------------
+asyncpg==0.30.0
+
+# --- Crypto ------------------------------------------------------------------
+# PyNaCl (libsodium) rather than `cryptography`, deliberately:
+#   * Ed25519 signing/verification  -> Phase 1 (device identity)
+#   * XChaCha20-Poly1305            -> Phase 3 (mesh payloads)
+# `cryptography` does NOT ship XChaCha20-Poly1305, and the Flutter client will
+# bind to libsodium as well. Same primitives, same library, both ends.
+PyNaCl==1.5.0
+PyJWT==2.10.1
+
+# --- Geospatial (Phase 3; pinned now so the env is stable) -------------------
+h3==4.2.1
+shapely==2.0.6
+pyproj==3.7.0
+
+# --- Dev / test --------------------------------------------------------------
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1

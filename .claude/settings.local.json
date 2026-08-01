@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py --version)",
+      "Bash(python -m compileall -q app tests)",
+      "Bash(echo \"EXIT:$?\")"
+    ]
+  }
+}
