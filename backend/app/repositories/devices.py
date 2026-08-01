@@ -84,6 +84,13 @@ async def claim_key_challenge(
     return KeyChallenge(**dict(row)) if row else None
 
 
+async def get(conn: asyncpg.Connection, device_id: uuid.UUID) -> Device | None:
+    row = await conn.fetchrow(
+        f"SELECT {_DEVICE_COLUMNS} FROM devices WHERE id = $1", device_id
+    )
+    return _to_device(row) if row else None
+
+
 async def get_by_public_key(
     conn: asyncpg.Connection, public_key: bytes
 ) -> Device | None:

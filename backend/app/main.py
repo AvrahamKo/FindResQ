@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db
-from .api.routes import auth, devices, health
+from .api.routes import auth, devices, events, health, memberships, sectors
 from .config import get_settings
 from .errors import AppError
 
@@ -64,3 +64,6 @@ async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(devices.router)
+app.include_router(events.router)
+app.include_router(sectors.router)
+app.include_router(memberships.router)

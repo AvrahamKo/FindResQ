@@ -35,6 +35,16 @@ class Settings(BaseSettings):
 
     device_challenge_ttl_seconds: int = 120
 
+    # Envelope encryption for sector keys at rest (app/security/envelope.py).
+    # This is a stand-in for a real KMS: swap this for AWS KMS / GCP KMS /
+    # Vault transit before a real deployment, without changing callers -- they
+    # only ever see wrap()/unwrap().
+    sector_key_wrap_secret: str = _PLACEHOLDER_SECRET
+
+    # Q8 join-time enforcement thresholds.
+    battery_warn_threshold_pct: int = 30
+    battery_block_threshold_pct: int = 15
+
     @property
     def is_local(self) -> bool:
         return self.env == "local"
@@ -49,6 +59,12 @@ class Settings(BaseSettings):
             )
         if len(self.jwt_secret) < 32 and not self.is_local:
             raise ValueError("JWT_SECRET must be at least 32 characters outside local.")
+
+        if not self.is_local and self.sector_key_wrap_secret == _PLACEHOLDER_SECRET:
+            raise ValueError(
+                f"SECTOR_KEY_WRAP_SECRET is still the placeholder while "
+                f"ENV={self.env!r}. Refusing to start."
+            )
         return self
 
 
