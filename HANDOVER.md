@@ -1,0 +1,188 @@
+# LifeSearch — Session Handover Summary
+
+**Date of handover:** 2026-08-02
+**Last commit:** `6368131` — "WIP Phase 5b: Auth & Join UI completed with passing E2E tests, debugging desktop OTP flow"
+**Status:** Phase 5b complete and verified. Git tree is clean (all work committed). Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover.
+
+This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/FastAPI) built through Phase 4; Flutter mobile client started in Phase 5. Read this whole file before doing anything — it front-loads verification steps that matter.
+
+---
+
+## 1. Exact current state
+
+### Test counts (verified at handover time, not from memory)
+- **Backend: 132 pytest tests passing, 0 skipped** (requires the Docker Postgres container running — see below).
+- **Mobile: 71 Dart tests passing** (`flutter test`), including one real end-to-end test that hits the actual running backend.
+
+If a new session reports different numbers than these, trust the new run, not this document — re-verify rather than assume drift is a bug.
+
+### Infrastructure right now
+- **Postgres**: Docker container `lifesearch-db` (`postgis/postgis:16-3.4`), defined in `backend/docker-compose.yml`. This is the **permanent** local dev database — always use it, never assume a different Postgres. Migrations 0001–0005 are applied. Bring it up with:
+  ```bash
+  cd backend && docker compose up -d
+  ```
+- **Backend server**: was started manually for verification (`uvicorn app.main:app --host 0.0.0.0 --port 8000`, run with `python -u` for **unbuffered** output — see "Known gotchas" below for why `-u` matters). It may or may not still be running when a new session starts — check first:
+  ```bash
+  curl -s http://localhost:8000/healthz
+  ```
+  If not running, start it from `backend/` with the project venv active:
+  ```bash
+  "C:/Users/avrah/FindResQ/venv/Scripts/python.exe" -u -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+  ```
+  **The venv lives at `C:\Users\avrah\FindResQ\venv`** — NOT `backend/venv`. This trips people up.
+- **Backend `.env`**: exists at `backend/.env` (gitignored, contains real generated secrets — `JWT_SECRET`, `SECTOR_KEY_WRAP_SECRET`). If it's ever missing, regenerate secrets with `python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"` and see `backend/.env.example` for the full variable list.
+- **Flutter SDK**: installed at `C:\Users\avrah\develop\flutter_windows_3.44.8-stable\flutter`. It is **not guaranteed to be on PATH** in a fresh shell — if `flutter`/`dart` aren't found, either use the full path (`C:\Users\avrah\develop\flutter_windows_3.44.8-stable\flutter\bin\flutter.bat`) or refresh PATH from the registry:
+  ```powershell
+  $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+  ```
+
+### What's built, by phase
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Postgres/PostGIS schema, H3 coverage ledger design | ✅ |
+| 1 | Phone/OTP auth, Ed25519 device enrolment (proof-of-possession) | ✅ |
+| 2 | Events, sectors, join codes, membership approval, session tokens w/ `key_epoch` | ✅ |
+| 3 | Ingest pipeline (11 stages: decrypt→verify→dedup→plausibility→segment→swath→hexify→ledger→recalc), search-theory POD math | ✅ |
+| 4 | Realtime dashboard: WebSocket transport, four-state presence + correlated-silence, coverage/presence REST endpoints | ✅ |
+| 5a | Flutter scaffold, Dart crypto layer (wire format, XChaCha20-Poly1305, Ed25519) mirroring the backend byte-for-byte | ✅ |
+| 5b | Flutter secure storage, API client, auth/join UI + Riverpod controllers | ✅ **(this session)** |
+| 5c | Location service + local offline buffer (SQLite/Hive) | ⬜ not started |
+| 5d | Sync/ingest upload from the mobile client | ⬜ not started |
+| 6 | Reports + SOS state machine + SMS fallback | ⬜ not started |
+| 7 | BLE mesh (Android) | ⬜ not started |
+| 8 | Teardown, expiry, PII purge lifecycle | ⬜ not started |
+
+---
+
+## 2. Key architectural decisions (the "why," not just the "what")
+
+### Crypto: real libsodium on both ends, never a reimplementation
+- **Backend**: PyNaCl, calling libsodium's low-level bindings directly (`nacl.bindings`), not the higher-level `SecretBox` (which is XSalsa20-Poly1305, a *different* construction).
+- **Mobile**: the `sodium` Dart package (**not** `sodium_libs` — that's discontinued, replaced by `sodium` directly as of its v4.0 native-assets rewrite).
+- **Why both sides bind to the actual C library**: a pure-Dart or pure-Python reimplementation of XChaCha20-Poly1305/Ed25519 would be a *second, independent implementation* of the same crypto that could silently drift from the other side. Binding both to libsodium eliminates that risk entirely.
+- **Wire format is a 27-byte fixed-width binary struct**, not JSON (`backend/app/mesh/wire_format.py` / `mobile/lib/core/crypto/wire_format.dart`). Ed25519 signs raw bytes; JSON would require both languages to agree on canonical serialization (key order, float formatting), a classic cross-language "signature verification fails intermittently" bug. Big-endian, fixed-point lat/lng (×1e7) instead of floats, for the same unambiguity reason.
+- **This wire format is proven byte-for-byte compatible with permanent regression tests in both repos** (not just each side's own unit tests): `backend/tests/test_wire_format_interop.py` decodes a fixture generated by the real Dart client; `mobile/test/core/crypto/wire_format_interop_test.dart` decodes one generated by the real Python backend. If you ever change the wire format, regenerate both fixtures (Dart side: `dart run tool/generate_interop_fixture.dart` from `mobile/`).
+
+### Storage: atomic JSON blobs, not scattered keys
+`SecureStorageManager` (`mobile/lib/core/storage/`) stores `StoredDeviceIdentity`, `StoredAccount`, and `StoredSession` each as **one JSON blob under one key**, not as several separate key-value pairs. Writing related fields separately risks the app being killed mid-write and leaving e.g. a session token persisted without its sector key. One write, one atomic unit.
+
+The actual storage backend is injected behind a `KeyValueStore` interface — production uses `flutter_secure_storage` (Keychain/Keystore), tests use an in-memory fake. This is what makes storage logic testable without a real platform channel (which doesn't exist in a bare `flutter test` host process).
+
+### State management: Riverpod `StateNotifier` + sealed-class states
+`AuthController` and `JoinController` are `StateNotifier`s exposing sealed classes (`AuthState`, `JoinState`) so the UI can exhaustively `switch` over every phase with no missed-case risk. `ApiClient` is deliberately **stateless with respect to auth** — every method takes its bearer token as an explicit parameter rather than the client holding "the current token" as mutable state; the controllers own token lifecycle.
+
+Device registration is retry-safe by construction: the Ed25519 keypair is generated and persisted to Secure Storage *before* any network call, so a dropped connection between "generate key" and "confirm registration" never causes a second keypair on retry. A 409 "already registered to you" conflict from the backend is treated as success (recovered via `GET /devices`), not failure.
+
+### Backend geospatial/coverage decisions (Phases 0–4, still governing)
+- **PostGIS `ST_Buffer` on `geography`** for swath buffering, not shapely+pyproj UTM reprojection in Python — `geography` buffering computes true ground-distance meters natively.
+- **H3 hexagonal grid, resolution 12** (~9.4m edge) for the coverage ledger.
+- **Search-theory POD formula lives in exactly one place**: the SQL function `recalc_hex_coverage()` (migration 0001). Never reimplemented in Python — tests drive the real function, they don't duplicate its math.
+- **CQRS-style ledger**: `hex_contributions` (immutable, one row per traverse-episode) + `hex_coverage_state` (derived, rebuildable from the ledger at any time).
+- **Realtime broadcast is a property of the data changing**, not application code remembering to notify: `AFTER INSERT OR UPDATE` triggers on `hex_coverage_state`/`device_presence` fire `pg_notify`. Verified empirically (not assumed) that Postgres collapses identical `(channel, payload)` notifications fired within one transaction into a single delivery — so a bulk UPSERT touching hundreds of rows produces exactly one notification.
+- **WebSocket auth uses short-lived, single-use tickets** (`POST .../ws-ticket` → `WS ?ticket=...`), not a bearer token in the URL query string (which would land in every proxy/access log).
+
+### Testing philosophy established across every phase
+**Prefer real infrastructure over mocks, and only mock at the outermost I/O boundary.** Concretely:
+- Real Postgres (Docker) for all DB-dependent backend tests — never a mocked database.
+- Real libsodium for all crypto tests — never a fake crypto implementation.
+- Real running backend server for the mobile e2e test — only the HTTP transport layer is ever mocked (via `http`'s `MockClient`), never the business logic.
+- DB-dependent tests skip gracefully (not fail) when the database is unreachable, via a `db_conn` fixture pattern — but tests needing a **real commit** (anything depending on `NOTIFY` delivery, which only fires post-commit) use an independent, non-rollback connection instead of the standard rollback-wrapped fixture.
+
+---
+
+## 3. Where things live (file map)
+
+### Backend (`backend/`)
+```
+app/
+  main.py                  FastAPI app, CORS, lifespan (DB pool, realtime listener, presence sweep)
+  config.py                Settings (pydantic-settings, reads .env)
+  db.py                    asyncpg pool
+  errors.py                Typed exceptions → HTTP error envelope
+  mesh/wire_format.py      27-byte struct pack/unpack — THE wire contract
+  security/
+    mesh_crypto.py         XChaCha20-Poly1305 (raw libsodium bindings)
+    signatures.py          Ed25519 verify
+    tokens.py              JWT issue/decode (account token + session token)
+    envelope.py            Sector key wrap/unwrap at rest
+  repositories/            One file per aggregate: users, devices, events, sectors,
+                           sector_keys, memberships, join_codes, track_points,
+                           hex_contributions, presence
+  ingest/
+    pipeline.py            The 11-stage ingest orchestrator
+    geometry.py, plausibility.py, segmentation.py, coverage.py   (pure logic, no DB)
+  presence/
+    classifier.py          Four-state + correlated-silence heuristic (pure)
+    sweep.py                DB orchestrator, periodic background task
+  realtime/
+    manager.py              WebSocket connection tracking (per-process, in-memory)
+    tickets.py               Short-lived single-use WS connection tickets
+    listener.py              Postgres LISTEN/NOTIFY background task
+  api/routes/               One file per resource: auth, devices, events, sectors,
+                            memberships, ingest, coverage, presence, ws
+migrations/                 0001_init → 0005_realtime, applied in order
+tests/                      132 tests; conftest.py has the db_conn skip-if-unreachable fixture
+docker-compose.yml           The permanent Postgres+PostGIS dev container
+```
+
+### Mobile (`mobile/`)
+```
+lib/
+  main.dart                        Entry point; platform-aware base URL selection
+  core/platform_base_url.dart      THE bug-fix from this session — pure, tested
+  core/crypto/                     Phase 5a: wire_format, mesh_crypto, device_identity,
+                                   sodium_provider — byte-for-byte mirror of the backend
+  core/storage/                    key_value_store (interface), secure_key_value_store
+                                   (prod), secure_storage_manager, stored_models
+  core/api/                        api_client, api_exception, api_models
+  core/auth/                       auth_controller, auth_state (sealed classes)
+  core/join/                       join_controller, join_state (sealed classes)
+  core/providers.dart              Riverpod wiring — every I/O-touching provider is
+                                   overridable for tests
+  app.dart                         Root widget; routes on AuthState → LoginScreen or
+                                   JoinScreen
+  ui/screens/                      phone_entry_view, otp_entry_view, login_screen,
+                                   join_code_view, membership_status_view, join_screen
+test/
+  core/                            Unit tests per module above
+  ui/                              Widget tests (app_flow_widget_test.dart drives the
+                                   ENTIRE UI flow through real screens)
+  e2e/auth_join_e2e_test.dart      Real end-to-end test against the real backend —
+                                   run this first if anything auth/join-related seems off
+  helpers/in_memory_key_value_store.dart   Test double for KeyValueStore
+tool/generate_interop_fixture.dart          Regenerate the Dart→Python interop fixture
+                                            if the wire format ever changes
+```
+
+---
+
+## 4. Known gaps and gotchas (read before debugging blind)
+
+1. **Flutter web target doesn't work yet.** The `sodium` package needs a manual JS-libsodium-asset download step for web builds (its own README calls this out) that was never done. Not a bug, just unfinished — orthogonal to everything else. `web/` and `windows/` platform folders exist in the repo (added during this session's debugging) but web specifically will hang on a blank splash screen forever if you try to run it without that extra step.
+2. **Android toolchain is incomplete.** `flutter doctor` reports missing `cmdline-tools` and unaccepted licenses. This does **not** block `flutter test` (runs on the host Dart VM regardless of mobile toolchain state) but **does** block building/running on an actual Android emulator or device. Needed before Phase 5c if location-service testing requires a real/emulated Android device.
+3. **Server output buffering**: if you ever redirect the backend's stdout to a file or pipe it through a task runner / IDE console, Python block-buffers non-TTY output and log lines can sit unwritten for a long time. Always run with `python -u` (or `PYTHONUNBUFFERED=1`) when output isn't going straight to a visible terminal.
+4. **`10.0.2.2` is Android-emulator-only.** If you ever see a Flutter client hang on any network call with nothing reaching the backend, check `mobile/lib/core/platform_base_url.dart` and confirm the target platform is being detected correctly — this exact bug already happened once this session.
+5. **Don't trust an analyzer-suggested rewrite without checking its actual behavior.** `flutter analyze`'s own suggestion to rewrite `if (label != null) 'label': label` as `?'label': label` silently changed the semantics (null-checks the map *key*, not the *value* — the key is a string literal, so the entry was always included). Caught by direct empirical testing, not by reading documentation. If `flutter analyze` suggests a rewrite involving `?` on a literal map key, verify it doesn't change behavior before applying it.
+6. **Battery percentage in the join-code UI is user-entered** (a slider), not read from the real device. Real battery telemetry is deferred to Phase 5c (location/device services), not part of the auth/join UI.
+7. **`MembershipInfo.role`/`movementMode` from the backend must be threaded through the join flow explicitly** — an earlier draft of `JoinController` hardcoded placeholder values instead of using the real fields already returned by `GET /memberships/{id}`; this was caught and fixed, but if you're extending the join flow, make sure new state transitions keep passing these through rather than reintroducing placeholders.
+
+---
+
+## 5. How to continue in a new session
+
+**First, always re-verify rather than trust this document blindly** (it may already be stale by the time you read it):
+```bash
+cd backend && docker compose up -d   # ensure Postgres is up
+curl -s http://localhost:8000/healthz   # check if the backend is already running
+# if not running, start it (see section 1 above)
+cd backend && "C:/Users/avrah/FindResQ/venv/Scripts/python.exe" -m pytest -q
+cd mobile && flutter test
+```
+If both suites are green and match (or exceed) the counts in Section 1, the project is in the state this document describes.
+
+**Then, pick up wherever the user directs — likely candidates, in the order they were originally planned:**
+- **Phase 5c**: Location service (foreground service on Android for background GPS, matching the Q8 battery-efficiency decisions from the original architecture review — distance-filtered sampling, not 1Hz) + local offline buffer (SQLite/Hive, ~10,000 point capacity per the original PRD). This is genuinely new ground for the mobile client — nothing built so far touches location APIs or local persistence beyond secure storage of tokens/keys.
+- **Phase 5d**: Wiring the local buffer to `/ingest` — packing, signing, and encrypting buffered points using the Phase 5a crypto layer (already built and proven), batching them, and calling the real `/ingest` endpoint (already built in Phase 3) from the Dart client for the first time.
+- **Phase 6+**: Reports/SOS, BLE mesh, teardown/PII lifecycle — all still fully unstarted, matching the original architecture review's build order.
+
+**Whatever you build next, hold it to the same standard already established**: real infrastructure over mocks wherever feasible, a genuine end-to-end test (not just unit tests) for anything crossing a real boundary (network, DB, native crypto), and don't trust a tool's own suggestion (linter, formatter) without empirically checking it preserves behavior.
