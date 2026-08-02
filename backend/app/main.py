@@ -22,6 +22,7 @@ from .api.routes import (
     memberships,
     presence,
     sectors,
+    sos,
     ws,
 )
 from .config import get_settings
@@ -131,4 +132,5 @@ app.include_router(memberships.router)
 app.include_router(ingest.router)
 app.include_router(coverage.router)
 app.include_router(presence.router)
+app.include_router(sos.router)
 app.include_router(ws.router)

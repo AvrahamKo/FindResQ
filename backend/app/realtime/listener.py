@@ -25,14 +25,17 @@ import asyncpg
 
 from ..api.schemas.coverage import HexCoverageOut
 from ..api.schemas.presence import PresenceOut
+from ..api.schemas.sos import SosOut
 from ..repositories import hex_contributions as hex_contrib_repo
 from ..repositories import presence as presence_repo
+from ..repositories import sos as sos_repo
 from .manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
 
 COVERAGE_CHANNEL = "sector_coverage_channel"
 PRESENCE_CHANNEL = "sector_presence_channel"
+SOS_CHANNEL = "sector_sos_channel"
 
 
 class RealtimeListener:
@@ -45,11 +48,13 @@ class RealtimeListener:
         self._conn: asyncpg.Connection | None = None
         self._coverage_checkpoints: dict[uuid.UUID, datetime] = {}
         self._presence_checkpoints: dict[uuid.UUID, datetime] = {}
+        self._sos_checkpoints: dict[uuid.UUID, datetime] = {}
 
     async def start(self) -> None:
         self._conn = await asyncpg.connect(self._database_url)
         await self._conn.add_listener(COVERAGE_CHANNEL, self._on_coverage_notify)
         await self._conn.add_listener(PRESENCE_CHANNEL, self._on_presence_notify)
+        await self._conn.add_listener(SOS_CHANNEL, self._on_sos_notify)
         logger.info("realtime listener connected and subscribed")
 
     async def stop(self) -> None:
@@ -66,6 +71,9 @@ class RealtimeListener:
 
     def _on_presence_notify(self, connection, pid, channel, payload: str) -> None:
         asyncio.create_task(self._safe(self._handle_presence_change, uuid.UUID(payload)))
+
+    def _on_sos_notify(self, connection, pid, channel, payload: str) -> None:
+        asyncio.create_task(self._safe(self._handle_sos_change, uuid.UUID(payload)))
 
     async def _safe(self, handler, sector_id: uuid.UUID) -> None:
         try:
@@ -122,5 +130,27 @@ class RealtimeListener:
                 "type": "presence_delta",
                 "sector_id": str(sector_id),
                 "devices": [PresenceOut(**asdict(r)).model_dump(mode="json") for r in rows],
+            },
+        )
+
+    async def _handle_sos_change(self, sector_id: uuid.UUID) -> None:
+        event_id = await self._event_id_for_sector(sector_id)
+        if event_id is None or self._manager.connection_count(event_id) == 0:
+            return
+
+        since = self._sos_checkpoints.get(sector_id)
+        checkpoint = datetime.now(timezone.utc)
+        async with self._pool.acquire() as conn:
+            rows = await sos_repo.get_for_sector(conn, sector_id, since)
+        self._sos_checkpoints[sector_id] = checkpoint
+
+        if not rows:
+            return
+        await self._manager.broadcast(
+            event_id,
+            {
+                "type": "sos_delta",
+                "sector_id": str(sector_id),
+                "alerts": [SosOut(**asdict(r)).model_dump(mode="json") for r in rows],
             },
         )

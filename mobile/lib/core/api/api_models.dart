@@ -269,3 +269,65 @@ class IngestResult {
     hexesTouched: json['hexes_touched'] as int,
   );
 }
+
+/// Mirrors `backend/app/api/schemas/sos.py`'s `SosOut`. Status is one of
+/// `active`, `acknowledged`, `resolved`, `cancelled` -- see
+/// `backend/migrations/0006_sos.sql` for the full state diagram.
+class SosAlert {
+  final String id;
+  final String sectorId;
+  final String deviceId;
+  final String userId;
+  final String status;
+  final double? lat;
+  final double? lng;
+  final DateTime triggeredAt;
+  final DateTime? acknowledgedAt;
+  final String? acknowledgedBy;
+  final DateTime? resolvedAt;
+  final String? resolvedBy;
+  final DateTime? cancelledAt;
+  final DateTime updatedAt;
+
+  const SosAlert({
+    required this.id,
+    required this.sectorId,
+    required this.deviceId,
+    required this.userId,
+    required this.status,
+    required this.lat,
+    required this.lng,
+    required this.triggeredAt,
+    required this.acknowledgedAt,
+    required this.acknowledgedBy,
+    required this.resolvedAt,
+    required this.resolvedBy,
+    required this.cancelledAt,
+    required this.updatedAt,
+  });
+
+  bool get isOpen => status == 'active' || status == 'acknowledged';
+
+  factory SosAlert.fromJson(Map<String, dynamic> json) => SosAlert(
+    id: json['id'] as String,
+    sectorId: json['sector_id'] as String,
+    deviceId: json['device_id'] as String,
+    userId: json['user_id'] as String,
+    status: json['status'] as String,
+    lat: (json['lat'] as num?)?.toDouble(),
+    lng: (json['lng'] as num?)?.toDouble(),
+    triggeredAt: DateTime.parse(json['triggered_at'] as String),
+    acknowledgedAt: json['acknowledged_at'] == null
+        ? null
+        : DateTime.parse(json['acknowledged_at'] as String),
+    acknowledgedBy: json['acknowledged_by'] as String?,
+    resolvedAt: json['resolved_at'] == null
+        ? null
+        : DateTime.parse(json['resolved_at'] as String),
+    resolvedBy: json['resolved_by'] as String?,
+    cancelledAt: json['cancelled_at'] == null
+        ? null
+        : DateTime.parse(json['cancelled_at'] as String),
+    updatedAt: DateTime.parse(json['updated_at'] as String),
+  );
+}

@@ -85,6 +85,20 @@ async def upsert_active(
     )
 
 
+async def get_for_device(
+    conn: asyncpg.Connection, device_id: uuid.UUID
+) -> PresenceRow | None:
+    row = await conn.fetchrow(
+        f"""
+        SELECT {_SELECT_COLUMNS}
+        FROM device_presence dp JOIN devices d ON d.id = dp.device_id
+        WHERE dp.device_id = $1
+        """,
+        device_id,
+    )
+    return _to_row(row) if row is not None else None
+
+
 async def get_for_sector(
     conn: asyncpg.Connection, sector_id: uuid.UUID, since: datetime | None = None
 ) -> list[PresenceRow]:

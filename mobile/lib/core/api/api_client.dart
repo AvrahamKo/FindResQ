@@ -249,5 +249,67 @@ class ApiClient {
     return IngestResult.fromJson(_decodeObject(response));
   }
 
+  // --- SOS (Phase 6) -------------------------------------------------------
+
+  /// Trigger/cancel use the device's own SECTOR SESSION token -- the
+  /// searcher acting as themselves, same as [ingest]. [lat]/[lng] are
+  /// optional: the backend falls back to the device's last known presence
+  /// point rather than requiring a fresh GPS fix before SOS can even be sent.
+  Future<SosAlert> triggerSos({
+    required String sessionToken,
+    double? lat,
+    double? lng,
+  }) async {
+    final response = await _post(
+      '/sos',
+      bearerToken: sessionToken,
+      body: {
+        if (lat != null) 'lat': lat,
+        if (lng != null) 'lng': lng,
+      },
+    );
+    return SosAlert.fromJson(_decodeObject(response));
+  }
+
+  Future<SosAlert> cancelSos({
+    required String sessionToken,
+    required String alertId,
+  }) async {
+    final response = await _post('/sos/$alertId/cancel', bearerToken: sessionToken);
+    return SosAlert.fromJson(_decodeObject(response));
+  }
+
+  /// List/acknowledge/resolve use the ACCOUNT token plus a Lead/Commander
+  /// role check on the backend -- these happen on a DIFFERENT device (the
+  /// Sector Lead's), not the volunteer's, same as membership moderation.
+  Future<List<SosAlert>> listSectorSos({
+    required String accountToken,
+    required String sectorId,
+  }) async {
+    final response = await _get('/sectors/$sectorId/sos', bearerToken: accountToken);
+    return _decodeList(
+      response,
+    ).map((e) => SosAlert.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<SosAlert> acknowledgeSos({
+    required String accountToken,
+    required String alertId,
+  }) async {
+    final response = await _post(
+      '/sos/$alertId/acknowledge',
+      bearerToken: accountToken,
+    );
+    return SosAlert.fromJson(_decodeObject(response));
+  }
+
+  Future<SosAlert> resolveSos({
+    required String accountToken,
+    required String alertId,
+  }) async {
+    final response = await _post('/sos/$alertId/resolve', bearerToken: accountToken);
+    return SosAlert.fromJson(_decodeObject(response));
+  }
+
   void close() => _http.close();
 }

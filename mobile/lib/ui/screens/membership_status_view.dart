@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
 import 'location_status_view.dart';
+import 'sos_alerts_view.dart';
+import 'sos_button_view.dart';
 
 const _pollInterval = Duration(seconds: 4);
 
@@ -200,6 +202,27 @@ class SessionActiveView extends StatelessWidget {
                   ),
                 ),
                 child: const Text('Location tracking'),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.tonal(
+                style: FilledButton.styleFrom(foregroundColor: Colors.red),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SosButtonView()),
+                ),
+                child: const Text('SOS'),
+              ),
+              const SizedBox(height: 12),
+              // Shown regardless of role -- the backend enforces the
+              // Lead/Commander check server-side (403 for a volunteer), so
+              // a plain searcher tapping this just sees that error rather
+              // than the button needing to duplicate the role check
+              // client-side from a session field this view doesn't
+              // currently thread through.
+              OutlinedButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SosAlertsView()),
+                ),
+                child: const Text('Sector SOS alerts (Lead/Commander)'),
               ),
             ],
           ),

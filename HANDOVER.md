@@ -1,8 +1,8 @@
 # LifeSearch — Session Handover Summary
 
 **Date of handover:** 2026-08-02
-**Last commit:** `e1a1753` — "Phase 5c completed: Battery-aware GPS tracking service, offline SQLite telemetry buffer, encrypted 91-byte wire-format packet builder, and location status UI" (Phase 5d work below is uncommitted as of this handover -- commit it before starting Phase 6).
-**Status:** Phase 5d complete and verified. Git tree has uncommitted Phase 5d changes. Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover.
+**Last commit:** `628bf82` — "Phase 5d completed: Ingest sync engine with batch upload, exponential backoff, and full-chain E2E test against real PostGIS" (Phase 6/SOS work below is uncommitted as of this handover -- commit it before starting Reports or SMS fallback).
+**Status:** Phase 6's SOS state machine sub-piece is complete and verified (Reports and SMS fallback are explicitly deferred -- see below). Git tree has uncommitted SOS changes. Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover -- **the backend server was restarted mid-session to pick up the new `/sos` route; see gotcha #12 below if a route you just added 404s.**
 
 This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/FastAPI) built through Phase 4; Flutter mobile client started in Phase 5. Read this whole file before doing anything — it front-loads verification steps that matter.
 
@@ -11,13 +11,13 @@ This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/Fa
 ## 1. Exact current state
 
 ### Test counts (verified at handover time, not from memory)
-- **Backend: 132 pytest tests passing, 0 skipped** (requires the Docker Postgres container running — see below).
-- **Mobile: 131 Dart tests passing** (`flutter test`, up from 105 at the Phase 5c handover), including two real end-to-end tests that hit the actual running backend (one now driving the FULL chain: fake GPS -> real crypto -> real SQLite buffer -> real `/ingest` -> real PostGIS).
+- **Backend: 161 pytest tests passing, 0 skipped** (up from 132 at the Phase 5d handover; requires the Docker Postgres container running — see below).
+- **Mobile: 163 Dart tests passing** (`flutter test`, up from 131 at the Phase 5d handover), including three real end-to-end tests that hit the actual running backend (auth/join; the full location->buffer->sync->PostGIS chain; and now the full SOS trigger->acknowledge->resolve chain).
 
 If a new session reports different numbers than these, trust the new run, not this document — re-verify rather than assume drift is a bug.
 
 ### Infrastructure right now
-- **Postgres**: Docker container `lifesearch-db` (`postgis/postgis:16-3.4`), defined in `backend/docker-compose.yml`. This is the **permanent** local dev database — always use it, never assume a different Postgres. Migrations 0001–0005 are applied. Bring it up with:
+- **Postgres**: Docker container `lifesearch-db` (`postgis/postgis:16-3.4`), defined in `backend/docker-compose.yml`. This is the **permanent** local dev database — always use it, never assume a different Postgres. Migrations 0001–0006 are applied. Bring it up with:
   ```bash
   cd backend && docker compose up -d
   ```
@@ -47,8 +47,10 @@ If a new session reports different numbers than these, trust the new run, not th
 | 5a | Flutter scaffold, Dart crypto layer (wire format, XChaCha20-Poly1305, Ed25519) mirroring the backend byte-for-byte | ✅ |
 | 5b | Flutter secure storage, API client, auth/join UI + Riverpod controllers | ✅ |
 | 5c | Location service (battery-aware GPS sampling) + local SQLite offline buffer + telemetry packet construction/encryption | ✅ |
-| 5d | Ingest sync engine: drains the local buffer to `/ingest` in batches, exponential backoff on failure | ✅ **(this session)** |
-| 6 | Reports + SOS state machine + SMS fallback | ⬜ not started |
+| 5d | Ingest sync engine: drains the local buffer to `/ingest` in batches, exponential backoff on failure | ✅ |
+| 6a | SOS state machine: trigger/acknowledge/resolve/cancel, realtime broadcast to the dashboard channel | ✅ **(this session)** |
+| 6b | Reports (clue/subject/hazard sightings) | ⬜ not started |
+| 6c | SMS fallback for SOS when offline | ⬜ **deliberately deferred** (see "How to continue") |
 | 7 | BLE mesh (Android) | ⬜ not started |
 | 8 | Teardown, expiry, PII purge lifecycle | ⬜ not started |
 
@@ -95,6 +97,15 @@ Device registration is retry-safe by construction: the Ed25519 keypair is genera
 - **`stop()` is synchronous**, same reasoning as `LocationTrackingController.stop()`: cancel the `Timer` and flip `_running = false` without awaiting anything, so the UI reflects "stopped" immediately and nothing in-flight can block it.
 - **The two controllers are wired together at the UI layer, not internally**: `LocationStatusView`'s Start button calls `LocationTrackingController.start()` then `IngestSyncController.start()` -- but ONLY if tracking actually reached `TrackingActive` (checked explicitly). A real bug caught during this phase: an earlier version started sync unconditionally, so a denied location permission left the sync loop running with nothing useful to do (and, in a widget test, a `Timer` that outlived the test). Stop is unconditional both ways (stopping sync even if tracking already failed is harmless).
 
+### SOS state machine: explicit and immediate, separate from passive presence
+- **States**: `active -> acknowledged -> resolved`, or `active`/`acknowledged -> cancelled` (only by the triggering user -- a false alarm). See `backend/migrations/0006_sos.sql` for the full diagram. This is deliberately independent of Phase 4's correlated-silence presence heuristic -- that's a passive INFERENCE from a device going quiet; SOS is an explicit, affirmative "I need help now" action from the searcher. They are not merged into one state machine.
+- **At most one OPEN alert per device, enforced by the database, not just application code**: a partial unique index (`sos_alerts_one_open_per_device`, on `device_id` `WHERE status IN ('active','acknowledged')`) makes a second trigger from the same device impossible to land as a duplicate row even under a race between two near-simultaneous requests. `sos_repo.trigger()` is idempotent on top of that (checks first, and also catches the unique-violation race and returns the existing row) -- a shaky-hands double-tap or an app restart mid-emergency must never fork into two concurrent incidents for what is the same emergency.
+- **Trigger/cancel use the device's SECTOR SESSION token** (same auth as `/ingest`); **list/acknowledge/resolve use the ACCOUNT token plus the existing Lead/Commander RBAC check** (`require_lead_or_commander`, same as membership moderation) -- those actions happen on a different device (the Sector Lead's), not the volunteer's.
+- **A missing trigger location falls back to the device's last known presence point** (`device_presence`, Phase 4) rather than requiring a fresh GPS fix before SOS can even be sent -- hitting SOS is exactly the moment a fresh fix might not have landed yet (canyon, indoors, dead zone).
+- **Realtime broadcast follows the established `hex_coverage_state`/`device_presence` pattern exactly**: an `AFTER INSERT OR UPDATE` trigger on `sos_alerts` notifies `sector_sos_channel`; `RealtimeListener` re-queries "what changed since my checkpoint" and broadcasts a `sos_delta` message over the same per-event WebSocket. Verified end-to-end against a real connected client in `backend/tests/test_sos_routes.py::TestRealtimeBroadcast`, mirroring `test_ws_dashboard.py`'s existing proof for hex/presence.
+- **Mobile: two independent controllers, not one.** `SosController` (searcher's own trigger/cancel) does not persist across app restarts -- there is no "get my current alert" endpoint, and none is needed, since `trigger()` is idempotent server-side, so pressing the button again after a restart safely lands back on the same open alert. `SosAlertsController` (Lead/Commander's list/acknowledge/resolve) is UI-driven polling (`Timer.periodic`, same convention as `PendingApprovalView`), not a `sos_delta` WebSocket client -- no WebSocket client exists in the Flutter app yet (see gotcha #13).
+- **Known scope boundary, not a bug**: `SosAlertsController` reads the acting user's `sectorId` from their OWN `StoredSession`, so a pure Commander who has never joined any sector as a member (the backend allows this; Commanders act via `event.commander_id`, no membership required) has no client-side way to discover a sector's id today. The E2E test (`mobile/test/e2e/sos_e2e_test.dart`) works around this by having the "Commander" character also self-join their own sector purely to populate `sectorId` locally -- the actual authorization still comes from the backend's Commander check, independent of that membership. Fine for this session's scope; would need a "my events/sectors" listing endpoint + screen to close properly.
+
 ### Testing philosophy established across every phase
 **Prefer real infrastructure over mocks, and only mock at the outermost I/O boundary.** Concretely:
 - Real Postgres (Docker) for all DB-dependent backend tests — never a mocked database.
@@ -121,7 +132,7 @@ app/
     envelope.py            Sector key wrap/unwrap at rest
   repositories/            One file per aggregate: users, devices, events, sectors,
                            sector_keys, memberships, join_codes, track_points,
-                           hex_contributions, presence
+                           hex_contributions, presence, sos (Phase 6)
   ingest/
     pipeline.py            The 11-stage ingest orchestrator
     geometry.py, plausibility.py, segmentation.py, coverage.py   (pure logic, no DB)
@@ -131,11 +142,17 @@ app/
   realtime/
     manager.py              WebSocket connection tracking (per-process, in-memory)
     tickets.py               Short-lived single-use WS connection tickets
-    listener.py              Postgres LISTEN/NOTIFY background task
+    listener.py              Postgres LISTEN/NOTIFY background task -- now also
+                              SOS_CHANNEL -> sos_delta (Phase 6), alongside
+                              coverage/presence
   api/routes/               One file per resource: auth, devices, events, sectors,
-                            memberships, ingest, coverage, presence, ws
-migrations/                 0001_init → 0005_realtime, applied in order
-tests/                      132 tests; conftest.py has the db_conn skip-if-unreachable fixture
+                            memberships, ingest, coverage, presence, sos (Phase 6), ws
+migrations/                 0001_init → 0006_sos, applied in order
+tests/                      161 tests; conftest.py has the db_conn skip-if-unreachable
+                            fixture; test_sos_repo.py/test_sos_routes.py (Phase 6) add
+                            their own local `real_conn` fixture for cases needing
+                            `now()` to actually advance between statements -- see
+                            gotcha #14
 docker-compose.yml           The permanent Postgres+PostGIS dev container
 ```
 
@@ -159,6 +176,9 @@ lib/
   core/storage/telemetry_buffer_store.dart   Phase 5c: real-SQLite FIFO packet buffer
   core/sync/                       Phase 5d: sync_backoff_policy (pure), sync_state
                                    (sealed), ingest_sync_controller
+  core/sos/                        Phase 6: sos_state/sos_controller (searcher's own
+                                   trigger/cancel), sos_alerts_state/sos_alerts_controller
+                                   (Lead/Commander list/acknowledge/resolve)
   core/providers.dart              Riverpod wiring — every I/O-touching provider is
                                    overridable for tests
   app.dart                         Root widget; routes on AuthState → LoginScreen or
@@ -168,7 +188,10 @@ lib/
                                    location_status_view (Phase 5c/5d debug/ops screen —
                                    drives BOTH LocationTrackingController and
                                    IngestSyncController from one Start/Stop pair,
-                                   reached from SessionActiveView)
+                                   reached from SessionActiveView), sos_button_view
+                                   (searcher SOS, Phase 6), sos_alerts_view
+                                   (Lead/Commander SOS list, Phase 6) — both reached
+                                   from SessionActiveView
 test/
   core/                            Unit tests per module above
   ui/                              Widget tests (app_flow_widget_test.dart drives the
@@ -178,6 +201,8 @@ test/
   e2e/location_sync_e2e_test.dart  Phase 5d: the FULL chain against the real backend —
                                    fake GPS -> real crypto -> real SQLite buffer -> real
                                    /ingest -> real PostGIS (hexes_touched proves it)
+  e2e/sos_e2e_test.dart            Phase 6: real trigger -> real list -> real
+                                   acknowledge -> real resolve, against the real backend
   helpers/in_memory_key_value_store.dart   Test double for KeyValueStore
   helpers/commander_fixture.dart   Shared E2E fixture (account/event/sector/join-code/
                                    approve against the real backend) -- used by both
@@ -205,6 +230,9 @@ tool/generate_interop_fixture.dart          Regenerate the Dart→Python interop
 9. **`TelemetryBufferStore` opens with `singleInstance: false`.** `sqflite_common`'s factories cache open connections by literal path string when `singleInstance` isn't set to false — every test using the literal `inMemoryDatabasePath` (`':memory:'`) would otherwise silently share ONE underlying connection across different `TelemetryBufferStore` instances, and close()/open() timing races between tests caused real (previously debugged) cross-test data leakage. If you ever see a `TelemetryBufferStore`-related test with an inexplicably wrong row count, check this first.
 10. **A real `Timer`-owning controller (like `IngestSyncController`) must be stopped as the LAST STATEMENT inside the `testWidgets` body itself, not via `tearDown` or `addTearDown`.** Flutter's test binding asserts no `Timer` is still pending as part of `_runTestBody`, which runs BEFORE both `tearDown` and `addTearDown` callbacks get a chance to fire — so `container.dispose()` (which would otherwise cancel the timer through the controller's own `dispose()`) is always too late if only called from `tearDown`. See `location_status_view_test.dart`'s `stopControllers()` helper and its usage for the working pattern.
 11. **A bare `await Future.delayed(...)` with no `tester.pump()` calls around it can hang indefinitely inside `testWidgets`** — real Timer/event-loop progress in that test binding only reliably happens interleaved with `pump()` calls. Any "wait for something timer-driven to happen" in a widget test must go through a `pump()` loop (see `pumpUntilFound` in `location_status_view_test.dart`), never a standalone delay. This is a DIFFERENT issue from gotcha #10 (or from Phase 5c's `sqflite_common_ffi`-under-FakeAsync gotcha) but produces the same symptom (a hang), so if a widget test hangs, check for a bare `Future.delayed` first — it's the cheapest thing to rule out.
+12. **After adding a new route to `main.py`, the ALREADY-RUNNING backend server process is still serving the OLD code until restarted.** Hit this directly this session: `POST /sos` 404'd against the running server for several minutes of debugging before realizing the fix was in the code, not the test -- the uvicorn process just hadn't picked up the new router registration (it wasn't started with `--reload`). If a route you just added/changed 404s or behaves like it doesn't exist, restart the server (`netstat -ano | grep :8000` to find the PID, kill it, relaunch per Section 1's start command) before debugging further.
+13. **There is still no WebSocket client anywhere in the Flutter app.** The backend's realtime broadcast (coverage/presence/SOS deltas, all three now) is fully built and proven end-to-end from the SERVER side (`test_ws_dashboard.py`, `test_sos_routes.py::TestRealtimeBroadcast`), but nothing on the mobile side subscribes to it -- `SosAlertsView`'s Lead/Commander list uses plain REST polling (`Timer.periodic`, 5s), same convention as `PendingApprovalView`. Building a real WS client in Flutter (ticket fetch -> connect -> handle `hex_delta`/`presence_delta`/`sos_delta`) is still open work, likely warranted once there's a concrete reason to want push latency instead of a 5s poll.
+14. **Postgres's `now()` is frozen at TRANSACTION START, not per-statement** — `conftest.py`'s `db_conn` fixture wraps a whole test in ONE transaction, so two sequential inserts under `db_conn` can get the IDENTICAL `now()`-derived timestamp, breaking any assertion that depends on strict ordering or a `updated_at > checkpoint` delta query. Hit this writing `test_sos_repo.py`'s `TestListAndDeltaQueries` (two triggers landed on the same `triggered_at`, and a resolve's `updated_at` didn't compare greater than its own trigger's checkpoint). Fix: use a local `real_conn` fixture (separate `asyncpg.connect()`, no wrapping transaction, manual cleanup -- same shape as `test_ws_dashboard.py`'s) for any test that needs `now()` to actually advance between statements; `db_conn` is still correct and preferred for everything else (its transaction-per-test isolation is exactly what most tests want).
 
 ---
 
@@ -221,8 +249,11 @@ cd mobile && flutter test
 If both suites are green and match (or exceed) the counts in Section 1, the project is in the state this document describes.
 
 **Then, pick up wherever the user directs — likely candidates, in the order they were originally planned:**
-- **Phase 6+**: Reports/SOS state machine + SMS fallback, BLE mesh (Android), teardown/PII purge lifecycle — all still fully unstarted, matching the original architecture review's build order. The full client-side data path (GPS -> buffer -> `/ingest` -> PostGIS) is now proven end-to-end, so Phase 6's SOS flow can build on `IngestSyncController`/`LocationTrackingController` rather than inventing a new upload path.
-- A few things intentionally deferred, not forgotten, if they come up: the join-code UI's battery slider is still user-entered rather than reading `BatteryPlusInfoProvider` (gotcha #6); `IngestSyncController`'s batch size (200) and intervals (30s base / 5s–5min backoff) are reasonable defaults but untuned against real cellular conditions; there's no UI surfacing of a stuck/growing buffer (e.g. "10,000 packets, buffer full, oldest data being dropped") beyond the debug view's raw pending count.
+- **Phase 6b (Reports)**: clue/subject/hazard sightings, structured, attached to a sector/location. Mostly CRUD + a mobile form + a Lead/Commander-side view -- the SOS work this session (migration + repo + schema + route + realtime broadcast + `sos_repo`'s idempotent-trigger pattern) is a reasonable template to follow for the backend shape, though Reports won't need the "one open per device" invariant or the session-vs-account-token split SOS has.
+- **Phase 6c (SMS fallback)**: explicitly deferred this session by user decision -- needs a real transport choice first (device-native `SmsManager` on Android vs. a server-side gateway like Twilio) before any code should be written; see the two options discussed and ask before assuming one.
+- **Phase 7+**: BLE mesh (Android), teardown/PII purge lifecycle -- still fully unstarted, matching the original architecture review's build order.
+- **A real WebSocket client in Flutter** (gotcha #13) would let `SosAlertsView` (and a future coverage/presence dashboard view) push-update instead of polling every 5s -- not urgent, but the backend has supported it since Phase 4 and now broadcasts three delta types (`hex_delta`, `presence_delta`, `sos_delta`) that nothing on the client consumes yet.
+- A few things intentionally deferred, not forgotten, if they come up: the join-code UI's battery slider is still user-entered rather than reading `BatteryPlusInfoProvider` (gotcha #6); `IngestSyncController`'s batch size (200) and intervals (30s base / 5s–5min backoff) are reasonable defaults but untuned against real cellular conditions; there's no UI surfacing of a stuck/growing buffer beyond the debug view's raw pending count; `SosAlertsController` requires the acting Lead/Commander to have a `StoredSession` of their own (gotcha-adjacent, see the SOS architectural section above) -- a "my events/sectors" endpoint + screen would close that gap for a pure Commander who never joins a sector as a member.
 - Note: the Android toolchain is still incomplete (`flutter doctor` reports missing `cmdline-tools`/licenses — see gotcha #2), so neither the location service nor the sync engine has been verified on a real/emulated Android device — only via `flutter test` (fake `LocationSource`/`BatteryInfoProvider`, real crypto/SQLite/HTTP) and the E2E tests against the real backend. If later work needs to verify real GPS/permission/background-execution behavior on-device, the toolchain will need fixing first.
 
 **Whatever you build next, hold it to the same standard already established**: real infrastructure over mocks wherever feasible, a genuine end-to-end test (not just unit tests) for anything crossing a real boundary (network, DB, native crypto), and don't trust a tool's own suggestion (linter, formatter) without empirically checking it preserves behavior.

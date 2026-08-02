@@ -293,4 +293,118 @@ void main() {
       expect(result.keyEpoch, equals(1));
     });
   });
+
+  group('sos', () {
+    Map<String, dynamic> alertJson({
+      String status = 'active',
+      double? lat = 31.7715,
+      double? lng = 35.2170,
+    }) => {
+      'id': 'alert-1',
+      'sector_id': 's1',
+      'device_id': 'device-1',
+      'user_id': 'u1',
+      'status': status,
+      'lat': lat,
+      'lng': lng,
+      'triggered_at': '2030-01-01T00:00:00Z',
+      'acknowledged_at': null,
+      'acknowledged_by': null,
+      'resolved_at': null,
+      'resolved_by': null,
+      'cancelled_at': null,
+      'updated_at': '2030-01-01T00:00:00Z',
+    };
+
+    test('triggerSos sends the session bearer token and omits null lat/lng', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json(alertJson(), 201);
+      });
+
+      final alert = await client.triggerSos(sessionToken: 'session-tok');
+
+      expect(captured!.url.path, equals('/sos'));
+      expect(captured!.headers['Authorization'], equals('Bearer session-tok'));
+      expect(jsonDecode(captured!.body), equals({}));
+      expect(alert.id, equals('alert-1'));
+      expect(alert.status, equals('active'));
+      expect(alert.isOpen, isTrue);
+    });
+
+    test('triggerSos includes lat/lng when provided', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json(alertJson(), 201);
+      });
+
+      await client.triggerSos(sessionToken: 'session-tok', lat: 31.77, lng: 35.21);
+
+      expect(
+        jsonDecode(captured!.body),
+        equals({'lat': 31.77, 'lng': 35.21}),
+      );
+    });
+
+    test('cancelSos posts to the alert-scoped endpoint', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json(alertJson(status: 'cancelled'), 200);
+      });
+
+      final alert = await client.cancelSos(sessionToken: 'session-tok', alertId: 'alert-1');
+
+      expect(captured!.url.path, equals('/sos/alert-1/cancel'));
+      expect(alert.status, equals('cancelled'));
+      expect(alert.isOpen, isFalse);
+    });
+
+    test('listSectorSos parses a list with the account bearer token', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return http.Response(
+          jsonEncode([alertJson(), alertJson(status: 'resolved')]),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final alerts = await client.listSectorSos(accountToken: 'acct-tok', sectorId: 's1');
+
+      expect(captured!.url.path, equals('/sectors/s1/sos'));
+      expect(captured!.headers['Authorization'], equals('Bearer acct-tok'));
+      expect(alerts, hasLength(2));
+      expect(alerts[1].status, equals('resolved'));
+    });
+
+    test('acknowledgeSos and resolveSos hit the right endpoints', () async {
+      final requests = <String>[];
+      final client = _clientReturning((request) {
+        requests.add(request.url.path);
+        return _json(alertJson(status: 'acknowledged'), 200);
+      });
+
+      await client.acknowledgeSos(accountToken: 'acct-tok', alertId: 'alert-1');
+      await client.resolveSos(accountToken: 'acct-tok', alertId: 'alert-1');
+
+      expect(requests, equals(['/sos/alert-1/acknowledge', '/sos/alert-1/resolve']));
+    });
+
+    test('a 403 from acknowledgeSos (wrong role) surfaces as ApiException', () async {
+      final client = _clientReturning(
+        (request) => _json({
+          'error': {'code': 'forbidden', 'message': 'only this sector\'s lead or the event\'s commander can do this'},
+        }, 403),
+      );
+
+      await expectLater(
+        client.acknowledgeSos(accountToken: 'tok', alertId: 'alert-1'),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 403)),
+      );
+    });
+  });
 }

@@ -31,6 +31,10 @@ import 'storage/key_value_store.dart';
 import 'storage/secure_key_value_store.dart';
 import 'storage/secure_storage_manager.dart';
 import 'storage/telemetry_buffer_store.dart';
+import 'sos/sos_alerts_controller.dart';
+import 'sos/sos_alerts_state.dart';
+import 'sos/sos_controller.dart';
+import 'sos/sos_state.dart';
 import 'sync/ingest_sync_controller.dart';
 import 'sync/sync_state.dart';
 
@@ -141,5 +145,22 @@ final ingestSyncControllerProvider =
         api: ref.watch(apiClientProvider),
         storage: ref.watch(secureStorageManagerProvider),
         buffer: ref.watch(telemetryBufferStoreProvider),
+      );
+    });
+
+// --- SOS (Phase 6) -------------------------------------------------------
+
+final sosControllerProvider = StateNotifierProvider<SosController, SosState>((ref) {
+  return SosController(
+    api: ref.watch(apiClientProvider),
+    storage: ref.watch(secureStorageManagerProvider),
+  );
+});
+
+final sosAlertsControllerProvider =
+    StateNotifierProvider<SosAlertsController, SosAlertsState>((ref) {
+      return SosAlertsController(
+        api: ref.watch(apiClientProvider),
+        storage: ref.watch(secureStorageManagerProvider),
       );
     });
