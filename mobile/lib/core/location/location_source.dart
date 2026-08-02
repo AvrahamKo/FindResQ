@@ -1,0 +1,75 @@
+/// GPS position source, abstracted away from `geolocator` -- same reasoning
+/// as [KeyValueStore]/[BatteryInfoProvider]: the real implementation talks
+/// to a platform channel that doesn't exist in a bare `flutter test` host
+/// process, so [LocationTrackingController] depends on this interface and
+/// tests supply a fake stream.
+library;
+
+import 'package:geolocator/geolocator.dart';
+
+import 'location_sample.dart';
+import 'location_sampling_policy.dart';
+
+enum LocationPermissionResult { granted, denied, deniedForever, serviceDisabled }
+
+abstract class LocationSource {
+  /// Ensures permission is granted, requesting it if merely undecided.
+  /// Never silently retries past a `deniedForever` result -- that requires
+  /// the user to go into app settings, which is the caller's job to surface.
+  Future<LocationPermissionResult> ensurePermission();
+
+  /// A stream of samples honoring [tier]'s distance filter and accuracy
+  /// hint. Each call starts a fresh platform subscription; callers are
+  /// responsible for cancelling the previous one before starting a new tier
+  /// (see `LocationTrackingController._subscribeAtCurrentTier`).
+  Stream<LocationSample> watch(SamplingTier tier);
+}
+
+LocationAccuracy _toGeolocatorAccuracy(AccuracyHint hint) => switch (hint) {
+  AccuracyHint.best => LocationAccuracy.best,
+  AccuracyHint.high => LocationAccuracy.high,
+  AccuracyHint.medium => LocationAccuracy.medium,
+  AccuracyHint.low => LocationAccuracy.low,
+};
+
+class GeolocatorLocationSource implements LocationSource {
+  @override
+  Future<LocationPermissionResult> ensurePermission() async {
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      return LocationPermissionResult.serviceDisabled;
+    }
+
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    return switch (permission) {
+      LocationPermission.denied => LocationPermissionResult.denied,
+      LocationPermission.deniedForever =>
+        LocationPermissionResult.deniedForever,
+      LocationPermission.whileInUse ||
+      LocationPermission.always => LocationPermissionResult.granted,
+      LocationPermission.unableToDetermine =>
+        LocationPermissionResult.denied,
+    };
+  }
+
+  @override
+  Stream<LocationSample> watch(SamplingTier tier) {
+    final settings = LocationSettings(
+      accuracy: _toGeolocatorAccuracy(tier.accuracyHint),
+      distanceFilter: tier.distanceFilterM.round(),
+    );
+    return Geolocator.getPositionStream(locationSettings: settings).map(
+      (position) => LocationSample(
+        latitude: position.latitude,
+        longitude: position.longitude,
+        accuracyM: position.accuracy,
+        speedMps: position.speed,
+        recordedAtMs: position.timestamp.millisecondsSinceEpoch,
+        isMocked: position.isMocked,
+      ),
+    );
+  }
+}

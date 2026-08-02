@@ -21,22 +21,34 @@ class StoredDeviceIdentity {
   /// registration doesn't cause a second keypair to be generated on retry.
   final String? deviceId;
 
+  /// The compact `devices.wire_id` (uint32) assigned alongside [deviceId] --
+  /// distinct from the UUID, this is the identifier that actually goes on
+  /// the wire in the 27-byte point payload (see `core/crypto/wire_format.dart`).
+  /// Always set together with [deviceId]; never populated on its own.
+  final int? wireId;
+
   const StoredDeviceIdentity({
     required this.publicKeyBase64,
     required this.secretKeyBase64,
     this.deviceId,
+    this.wireId,
   });
 
-  StoredDeviceIdentity withDeviceId(String deviceId) => StoredDeviceIdentity(
+  StoredDeviceIdentity withRegistration({
+    required String deviceId,
+    required int wireId,
+  }) => StoredDeviceIdentity(
     publicKeyBase64: publicKeyBase64,
     secretKeyBase64: secretKeyBase64,
     deviceId: deviceId,
+    wireId: wireId,
   );
 
   Map<String, dynamic> toJson() => {
     'publicKeyBase64': publicKeyBase64,
     'secretKeyBase64': secretKeyBase64,
     'deviceId': deviceId,
+    'wireId': wireId,
   };
 
   factory StoredDeviceIdentity.fromJson(Map<String, dynamic> json) =>
@@ -44,6 +56,7 @@ class StoredDeviceIdentity {
         publicKeyBase64: json['publicKeyBase64'] as String,
         secretKeyBase64: json['secretKeyBase64'] as String,
         deviceId: json['deviceId'] as String?,
+        wireId: json['wireId'] as int?,
       );
 }
 

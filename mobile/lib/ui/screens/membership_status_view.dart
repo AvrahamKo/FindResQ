@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
+import 'location_status_view.dart';
 
 const _pollInterval = Duration(seconds: 4);
 
@@ -190,6 +191,15 @@ class SessionActiveView extends StatelessWidget {
                 'You are active in $sectorName.',
                 style: const TextStyle(fontSize: 18),
                 textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              OutlinedButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const LocationStatusView(),
+                  ),
+                ),
+                child: const Text('Location tracking'),
               ),
             ],
           ),

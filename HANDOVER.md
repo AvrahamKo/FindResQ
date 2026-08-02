@@ -1,8 +1,8 @@
 # LifeSearch — Session Handover Summary
 
 **Date of handover:** 2026-08-02
-**Last commit:** `6368131` — "WIP Phase 5b: Auth & Join UI completed with passing E2E tests, debugging desktop OTP flow"
-**Status:** Phase 5b complete and verified. Git tree is clean (all work committed). Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover.
+**Last commit:** `6368131` — "WIP Phase 5b: Auth & Join UI completed with passing E2E tests, debugging desktop OTP flow" (Phase 5c work below is uncommitted as of this handover -- commit it before starting Phase 5d).
+**Status:** Phase 5c complete and verified. Git tree has uncommitted Phase 5c changes. Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover.
 
 This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/FastAPI) built through Phase 4; Flutter mobile client started in Phase 5. Read this whole file before doing anything — it front-loads verification steps that matter.
 
@@ -12,7 +12,7 @@ This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/Fa
 
 ### Test counts (verified at handover time, not from memory)
 - **Backend: 132 pytest tests passing, 0 skipped** (requires the Docker Postgres container running — see below).
-- **Mobile: 71 Dart tests passing** (`flutter test`), including one real end-to-end test that hits the actual running backend.
+- **Mobile: 105 Dart tests passing** (`flutter test`, up from 71 at the Phase 5b handover), including one real end-to-end test that hits the actual running backend.
 
 If a new session reports different numbers than these, trust the new run, not this document — re-verify rather than assume drift is a bug.
 
@@ -45,8 +45,8 @@ If a new session reports different numbers than these, trust the new run, not th
 | 3 | Ingest pipeline (11 stages: decrypt→verify→dedup→plausibility→segment→swath→hexify→ledger→recalc), search-theory POD math | ✅ |
 | 4 | Realtime dashboard: WebSocket transport, four-state presence + correlated-silence, coverage/presence REST endpoints | ✅ |
 | 5a | Flutter scaffold, Dart crypto layer (wire format, XChaCha20-Poly1305, Ed25519) mirroring the backend byte-for-byte | ✅ |
-| 5b | Flutter secure storage, API client, auth/join UI + Riverpod controllers | ✅ **(this session)** |
-| 5c | Location service + local offline buffer (SQLite/Hive) | ⬜ not started |
+| 5b | Flutter secure storage, API client, auth/join UI + Riverpod controllers | ✅ |
+| 5c | Location service (battery-aware GPS sampling) + local SQLite offline buffer + telemetry packet construction/encryption | ✅ **(this session)** |
 | 5d | Sync/ingest upload from the mobile client | ⬜ not started |
 | 6 | Reports + SOS state machine + SMS fallback | ⬜ not started |
 | 7 | BLE mesh (Android) | ⬜ not started |
@@ -80,6 +80,14 @@ Device registration is retry-safe by construction: the Ed25519 keypair is genera
 - **CQRS-style ledger**: `hex_contributions` (immutable, one row per traverse-episode) + `hex_coverage_state` (derived, rebuildable from the ledger at any time).
 - **Realtime broadcast is a property of the data changing**, not application code remembering to notify: `AFTER INSERT OR UPDATE` triggers on `hex_coverage_state`/`device_presence` fire `pg_notify`. Verified empirically (not assumed) that Postgres collapses identical `(channel, payload)` notifications fired within one transaction into a single delivery — so a bulk UPSERT touching hundreds of rows produces exactly one notification.
 - **WebSocket auth uses short-lived, single-use tickets** (`POST .../ws-ticket` → `WS ?ticket=...`), not a bearer token in the URL query string (which would land in every proxy/access log).
+
+### Location tracking: battery-aware sampling tiers, packet construction decoupled from upload
+- **`LocationSamplingPolicy` (`mobile/lib/core/location/location_sampling_policy.dart`) is pure logic**, no plugin import, mapping `(batteryPct, isCharging) -> SamplingTier` (distance filter in meters + an accuracy hint). Tiers: high (≥60%, 10m), balanced (30–59%, 25m), saver (15–29%, 50m), critical (<15%, 100m) — charging always forces `high` regardless of level. Distance-filtered sampling, not fixed-interval polling, per the original architecture review's Q8: a stationary searcher shouldn't drain the battery for zero new track data.
+- **`LocationTrackingController` re-checks the tier after every emitted sample** (not on a separate timer) and re-subscribes to `LocationSource` at the new tier when it changes — keeps the whole controller driven by the position stream, with no wall-clock dependency, which is also what makes it testable via a fake stream with no `fake_async`.
+- **`stop()` is synchronous and does NOT await `StreamSubscription.cancel()`** — deliberately. Under `testWidgets`'s test zone, a broadcast `StreamController`'s `cancel()` future was observed to never resolve while `tester.pump()` calls kept being issued back-to-back (see the "known gotchas" entry below); not depending on it also means state reflects "stopped" immediately and a slow/stalled cancel can never block the UI.
+- **Telemetry packet construction mirrors the backend exactly**: `TelemetryPacketBuilder` (`mobile/lib/core/location/telemetry_packet_builder.dart`) does `pack(point) -> sign(payload) -> encrypt(payload || signature)`, producing the same 91-byte plaintext shape as `backend/app/ingest/pipeline.py`'s `_EXPECTED_PLAINTEXT_BYTES`. This is Phase 5c's contribution to the wire contract; Phase 5a's `wire_format.dart`/`mesh_crypto.dart` did the packing/crypto primitives, this phase composes them into an actual packet.
+- **The local buffer (`TelemetryBufferStore`) is real SQLite** via `sqflite_common`'s `DatabaseFactory` abstraction — the `sqflite` plugin's factory on Android/iOS, `sqflite_common_ffi`'s factory everywhere else (desktop, tests) — not a fake or an in-memory Dart structure. FIFO-capacity-bounded at 10,000 packets per the original PRD; `peekOldest`/`acknowledge` (not a destructive dequeue) so Phase 5d's upload path can retry safely on a dropped connection.
+- **`StoredDeviceIdentity` now also carries `wireId`** (previously only `deviceId`, the UUID) — added because the wire format needs the compact `devices.wire_id`, not the UUID, and it wasn't threaded through to storage before this phase. `AuthController._ensureDeviceRegistered` now saves both together via `withRegistration(...)` (was `withDeviceId(...)`).
 
 ### Testing philosophy established across every phase
 **Prefer real infrastructure over mocks, and only mock at the outermost I/O boundary.** Concretely:
@@ -137,12 +145,20 @@ lib/
   core/api/                        api_client, api_exception, api_models
   core/auth/                       auth_controller, auth_state (sealed classes)
   core/join/                       join_controller, join_state (sealed classes)
+  core/location/                   Phase 5c: location_sample, location_source (+
+                                   GeolocatorLocationSource), battery_info_provider (+
+                                   BatteryPlusInfoProvider), location_sampling_policy
+                                   (pure), telemetry_packet_builder, tracking_state
+                                   (sealed), location_tracking_controller
+  core/storage/telemetry_buffer_store.dart   Phase 5c: real-SQLite FIFO packet buffer
   core/providers.dart              Riverpod wiring — every I/O-touching provider is
                                    overridable for tests
   app.dart                         Root widget; routes on AuthState → LoginScreen or
                                    JoinScreen
   ui/screens/                      phone_entry_view, otp_entry_view, login_screen,
-                                   join_code_view, membership_status_view, join_screen
+                                   join_code_view, membership_status_view, join_screen,
+                                   location_status_view (Phase 5c debug/ops screen,
+                                   reached from SessionActiveView)
 test/
   core/                            Unit tests per module above
   ui/                              Widget tests (app_flow_widget_test.dart drives the
@@ -163,8 +179,10 @@ tool/generate_interop_fixture.dart          Regenerate the Dart→Python interop
 3. **Server output buffering**: if you ever redirect the backend's stdout to a file or pipe it through a task runner / IDE console, Python block-buffers non-TTY output and log lines can sit unwritten for a long time. Always run with `python -u` (or `PYTHONUNBUFFERED=1`) when output isn't going straight to a visible terminal.
 4. **`10.0.2.2` is Android-emulator-only.** If you ever see a Flutter client hang on any network call with nothing reaching the backend, check `mobile/lib/core/platform_base_url.dart` and confirm the target platform is being detected correctly — this exact bug already happened once this session.
 5. **Don't trust an analyzer-suggested rewrite without checking its actual behavior.** `flutter analyze`'s own suggestion to rewrite `if (label != null) 'label': label` as `?'label': label` silently changed the semantics (null-checks the map *key*, not the *value* — the key is a string literal, so the entry was always included). Caught by direct empirical testing, not by reading documentation. If `flutter analyze` suggests a rewrite involving `?` on a literal map key, verify it doesn't change behavior before applying it.
-6. **Battery percentage in the join-code UI is user-entered** (a slider), not read from the real device. Real battery telemetry is deferred to Phase 5c (location/device services), not part of the auth/join UI.
+6. **Battery percentage in the join-code UI is still user-entered** (a slider) — Phase 5c added `BatteryPlusInfoProvider` for real device battery, but only for the location-tracking sampling policy, not (yet) wired back into the join-code UI's slider. Leave as-is unless asked to change it; it's a deliberate scope boundary, not an oversight.
 7. **`MembershipInfo.role`/`movementMode` from the backend must be threaded through the join flow explicitly** — an earlier draft of `JoinController` hardcoded placeholder values instead of using the real fields already returned by `GET /memberships/{id}`; this was caught and fixed, but if you're extending the join flow, make sure new state transitions keep passing these through rather than reintroducing placeholders.
+8. **`sqflite_common_ffi`'s isolate-backed `databaseFactoryFfi` does not work inside `testWidgets`** (Flutter's widget-test zone) — its background isolate's replies arrive via the real event loop in a way `tester.pump()` never observes, so any `await` on it can hang indefinitely while pumps keep getting issued. Use `databaseFactoryFfiNoIsolate` (same package) for any widget test that touches `TelemetryBufferStore`; the plain, non-widget `test()`-based controller test uses the normal isolate-backed `databaseFactoryFfi` instead, since a bare `test()` isn't wrapped in that zone. See `mobile/test/ui/screens/location_status_view_test.dart`'s `setUp` for the concrete pattern.
+9. **`TelemetryBufferStore` opens with `singleInstance: false`.** `sqflite_common`'s factories cache open connections by literal path string when `singleInstance` isn't set to false — every test using the literal `inMemoryDatabasePath` (`':memory:'`) would otherwise silently share ONE underlying connection across different `TelemetryBufferStore` instances, and close()/open() timing races between tests caused real (previously debugged) cross-test data leakage. If you ever see a `TelemetryBufferStore`-related test with an inexplicably wrong row count, check this first.
 
 ---
 
@@ -181,8 +199,8 @@ cd mobile && flutter test
 If both suites are green and match (or exceed) the counts in Section 1, the project is in the state this document describes.
 
 **Then, pick up wherever the user directs — likely candidates, in the order they were originally planned:**
-- **Phase 5c**: Location service (foreground service on Android for background GPS, matching the Q8 battery-efficiency decisions from the original architecture review — distance-filtered sampling, not 1Hz) + local offline buffer (SQLite/Hive, ~10,000 point capacity per the original PRD). This is genuinely new ground for the mobile client — nothing built so far touches location APIs or local persistence beyond secure storage of tokens/keys.
-- **Phase 5d**: Wiring the local buffer to `/ingest` — packing, signing, and encrypting buffered points using the Phase 5a crypto layer (already built and proven), batching them, and calling the real `/ingest` endpoint (already built in Phase 3) from the Dart client for the first time.
+- **Phase 5d**: Wiring `TelemetryBufferStore` to `/ingest` — `LocationTrackingController` already buffers real encrypted packets (`peekOldest`/`acknowledge` are the intended read/ack API); this phase batches them and calls the real `/ingest` endpoint (already built in Phase 3) from the Dart client for the first time, handling partial-batch acceptance and retry on a dropped connection.
 - **Phase 6+**: Reports/SOS, BLE mesh, teardown/PII lifecycle — all still fully unstarted, matching the original architecture review's build order.
+- Note: the Android toolchain is still incomplete (`flutter doctor` reports missing `cmdline-tools`/licenses — see gotcha #2), so Phase 5c's location service has only been verified via `flutter test` (fake `LocationSource`/`BatteryInfoProvider`, real crypto/SQLite), never on a real/emulated Android device. If Phase 5d or later work needs to verify real GPS/permission behavior on-device, the toolchain will need fixing first.
 
 **Whatever you build next, hold it to the same standard already established**: real infrastructure over mocks wherever feasible, a genuine end-to-end test (not just unit tests) for anything crossing a real boundary (network, DB, native crypto), and don't trust a tool's own suggestion (linter, formatter) without empirically checking it preserves behavior.

@@ -31,16 +31,19 @@ void main() {
       expect(await manager.loadDeviceIdentity(), isNull);
     });
 
-    test('withDeviceId preserves the keypair and adds the id', () async {
+    test('withRegistration preserves the keypair and adds id/wireId', () async {
       const identity = StoredDeviceIdentity(
         publicKeyBase64: 'pub==',
         secretKeyBase64: 'sec==',
       );
-      await manager.saveDeviceIdentity(identity.withDeviceId('device-123'));
+      await manager.saveDeviceIdentity(
+        identity.withRegistration(deviceId: 'device-123', wireId: 7),
+      );
 
       final loaded = await manager.loadDeviceIdentity();
       expect(loaded?.publicKeyBase64, equals('pub=='));
       expect(loaded?.deviceId, equals('device-123'));
+      expect(loaded?.wireId, equals(7));
     });
   });
 

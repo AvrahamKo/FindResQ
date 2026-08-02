@@ -146,18 +146,22 @@ class AuthController extends StateNotifier<AuthState> {
     }
 
     try {
-      final deviceId = await _registerDevice(account.accessToken, identity);
-      await _storage.saveDeviceIdentity(identity.withDeviceId(deviceId));
-      _signIn(account, deviceId);
+      final device = await _registerDevice(account.accessToken, identity);
+      await _storage.saveDeviceIdentity(
+        identity.withRegistration(deviceId: device.id, wireId: device.wireId),
+      );
+      _signIn(account, device.id);
     } on ApiException catch (e) {
       if (e.isDuplicateDeviceRegistration) {
-        final deviceId = await _recoverDeviceIdAfterConflict(
+        final device = await _recoverDeviceAfterConflict(
           account.accessToken,
           identity.publicKeyBase64,
         );
-        if (deviceId != null) {
-          await _storage.saveDeviceIdentity(identity.withDeviceId(deviceId));
-          _signIn(account, deviceId);
+        if (device != null) {
+          await _storage.saveDeviceIdentity(
+            identity.withRegistration(deviceId: device.id, wireId: device.wireId),
+          );
+          _signIn(account, device.id);
           return;
         }
       }
@@ -175,7 +179,7 @@ class AuthController extends StateNotifier<AuthState> {
     return identity;
   }
 
-  Future<String> _registerDevice(
+  Future<DeviceInfo> _registerDevice(
     String accountToken,
     StoredDeviceIdentity identity,
   ) async {
@@ -184,14 +188,13 @@ class AuthController extends StateNotifier<AuthState> {
       identity,
       challenge.nonceBase64,
     );
-    final device = await _api.registerDevice(
+    return _api.registerDevice(
       accountToken: accountToken,
       challengeId: challenge.challengeId,
       publicKeyBase64: identity.publicKeyBase64,
       signatureBase64: signatureBase64,
       platform: _platformName,
     );
-    return device.id;
   }
 
   String _signChallengeNonce(StoredDeviceIdentity identity, String nonceB64) {
@@ -209,15 +212,15 @@ class AuthController extends StateNotifier<AuthState> {
   /// The 409 "already registered to you" path: the backend already has a
   /// device row for this public key (perhaps registration succeeded on a
   /// previous attempt whose response never reached this device). Find that
-  /// device's id via the list endpoint rather than treating this as fatal.
-  Future<String?> _recoverDeviceIdAfterConflict(
+  /// device via the list endpoint rather than treating this as fatal.
+  Future<DeviceInfo?> _recoverDeviceAfterConflict(
     String accountToken,
     String publicKeyBase64,
   ) async {
     final devices = await _api.listDevices(accountToken);
     for (final device in devices) {
       if (device.publicKeyBase64 == publicKeyBase64) {
-        return device.id;
+        return device;
       }
     }
     return null;

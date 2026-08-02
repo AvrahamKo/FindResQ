@@ -39,6 +39,11 @@ dependencies:
   flutter_riverpod: ^2.6.1
   http: ^1.6.0
   state_notifier: ^1.0.0
+  geolocator: ^14.0.3
+  battery_plus: ^7.1.1
+  sqflite: ^2.4.3
+  sqflite_common_ffi: ^2.4.2
+  sqflite_common: ^2.5.11
 dev_dependencies:
   flutter_test:
     sdk: flutter
