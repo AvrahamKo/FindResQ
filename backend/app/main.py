@@ -93,8 +93,22 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"] if get_settings().is_local else [],
-    allow_credentials=True,
+    # Wide open in local dev: a native desktop/mobile client isn't subject to
+    # CORS at all (no browser involved), but `flutter run -d chrome` and the
+    # web dashboard both are, and Flutter's web dev server picks a random
+    # port per run -- there is no fixed origin to allowlist here that
+    # wouldn't need updating every time. Locked down to real origins before
+    # any non-local deployment.
+    #
+    # allow_credentials is deliberately False: this API authenticates via an
+    # `Authorization: Bearer` header, never cookies, so there is no need for
+    # CORS "credentials" mode -- and `allow_origins=["*"]` combined with
+    # allow_credentials=True is invalid per the CORS spec anyway (browsers
+    # reject a wildcard origin on any credentialed request), so turning it
+    # on here would silently produce a config that looks fine but fails in
+    # a real browser.
+    allow_origins=["*"] if get_settings().is_local else [],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
