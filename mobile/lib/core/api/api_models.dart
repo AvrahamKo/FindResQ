@@ -331,3 +331,90 @@ class SosAlert {
     updatedAt: DateTime.parse(json['updated_at'] as String),
   );
 }
+
+/// Mirrors `backend/app/api/schemas/reports.py`'s `ReportIngestResponse` --
+/// same counts-only shape as [IngestResult], for the same reason: every
+/// bucket is a terminal, deterministic outcome for that exact packet.
+class ReportIngestResult {
+  final int accepted;
+  final int duplicate;
+  final int decryptFailed;
+  final int signatureInvalid;
+  final int wrongDevice;
+  final int malformed;
+
+  const ReportIngestResult({
+    required this.accepted,
+    required this.duplicate,
+    required this.decryptFailed,
+    required this.signatureInvalid,
+    required this.wrongDevice,
+    required this.malformed,
+  });
+
+  factory ReportIngestResult.fromJson(Map<String, dynamic> json) => ReportIngestResult(
+    accepted: json['accepted'] as int,
+    duplicate: json['duplicate'] as int,
+    decryptFailed: json['decrypt_failed'] as int,
+    signatureInvalid: json['signature_invalid'] as int,
+    wrongDevice: json['wrong_device'] as int,
+    malformed: json['malformed'] as int,
+  );
+}
+
+/// Mirrors `backend/app/api/schemas/reports.py`'s `ReportOut`.
+class Report {
+  final String id;
+  final String sectorId;
+  final String deviceId;
+  final String userId;
+  final String kind;
+  final double lat;
+  final double lng;
+  final String? note;
+  final DateTime recordedAt;
+  final DateTime receivedAt;
+  final String deliveryPath;
+  final String status;
+  final String? acknowledgedBy;
+  final DateTime? acknowledgedAt;
+  final DateTime updatedAt;
+
+  const Report({
+    required this.id,
+    required this.sectorId,
+    required this.deviceId,
+    required this.userId,
+    required this.kind,
+    required this.lat,
+    required this.lng,
+    required this.note,
+    required this.recordedAt,
+    required this.receivedAt,
+    required this.deliveryPath,
+    required this.status,
+    required this.acknowledgedBy,
+    required this.acknowledgedAt,
+    required this.updatedAt,
+  });
+
+  factory Report.fromJson(Map<String, dynamic> json) => Report(
+    id: json['id'] as String,
+    sectorId: json['sector_id'] as String,
+    deviceId: json['device_id'] as String,
+    userId: json['user_id'] as String,
+    kind: json['kind'] as String,
+    lat: (json['lat'] as num).toDouble(),
+    lng: (json['lng'] as num).toDouble(),
+    note: json['note'] as String?,
+    recordedAt: DateTime.parse(json['recorded_at'] as String),
+    receivedAt: DateTime.parse(json['received_at'] as String),
+    deliveryPath: json['delivery_path'] as String,
+    status: json['status'] as String,
+    acknowledgedBy: json['acknowledged_by'] as String?,
+    acknowledgedAt: json['acknowledged_at'] == null
+        ? null
+        : DateTime.parse(json['acknowledged_at'] as String),
+    updatedAt: DateTime.parse(json['updated_at'] as String),
+  );
+}

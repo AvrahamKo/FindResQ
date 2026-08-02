@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
 import 'location_status_view.dart';
+import 'report_form_view.dart';
+import 'reports_list_view.dart';
 import 'sos_alerts_view.dart';
 import 'sos_button_view.dart';
 
@@ -223,6 +225,20 @@ class SessionActiveView extends StatelessWidget {
                   MaterialPageRoute(builder: (_) => const SosAlertsView()),
                 ),
                 child: const Text('Sector SOS alerts (Lead/Commander)'),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ReportFormView()),
+                ),
+                child: const Text('File a report'),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ReportsListView()),
+                ),
+                child: const Text('Sector reports'),
               ),
             ],
           ),

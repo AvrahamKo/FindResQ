@@ -17,6 +17,11 @@ class FakeLocationSource implements LocationSource {
   LocationPermissionResult permissionResult = LocationPermissionResult.granted;
   final List<SamplingTier> tiersRequested = [];
 
+  /// What [getCurrentPosition] resolves with -- set by the test, or throws
+  /// [currentPositionError] if that's set instead.
+  LocationSample currentPosition = sampleAt();
+  Object? currentPositionError;
+
   @override
   Future<LocationPermissionResult> ensurePermission() async =>
       permissionResult;
@@ -25,6 +30,13 @@ class FakeLocationSource implements LocationSource {
   Stream<LocationSample> watch(SamplingTier tier) {
     tiersRequested.add(tier);
     return _controller.stream;
+  }
+
+  @override
+  Future<LocationSample> getCurrentPosition() async {
+    final error = currentPositionError;
+    if (error != null) throw error;
+    return currentPosition;
   }
 
   void emit(LocationSample sample) => _controller.add(sample);

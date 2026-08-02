@@ -23,6 +23,11 @@ abstract class LocationSource {
   /// responsible for cancelling the previous one before starting a new tier
   /// (see `LocationTrackingController._subscribeAtCurrentTier`).
   Stream<LocationSample> watch(SamplingTier tier);
+
+  /// A single fresh fix, for callers that need "where am I right now" once
+  /// rather than a continuous stream -- e.g. filing a field report (see
+  /// `ReportController`). Not part of the continuous tracking pipeline.
+  Future<LocationSample> getCurrentPosition();
 }
 
 LocationAccuracy _toGeolocatorAccuracy(AccuracyHint hint) => switch (hint) {
@@ -70,6 +75,21 @@ class GeolocatorLocationSource implements LocationSource {
         recordedAtMs: position.timestamp.millisecondsSinceEpoch,
         isMocked: position.isMocked,
       ),
+    );
+  }
+
+  @override
+  Future<LocationSample> getCurrentPosition() async {
+    final position = await Geolocator.getCurrentPosition(
+      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+    );
+    return LocationSample(
+      latitude: position.latitude,
+      longitude: position.longitude,
+      accuracyM: position.accuracy,
+      speedMps: position.speed,
+      recordedAtMs: position.timestamp.millisecondsSinceEpoch,
+      isMocked: position.isMocked,
     );
   }
 }

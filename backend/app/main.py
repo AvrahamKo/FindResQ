@@ -21,6 +21,7 @@ from .api.routes import (
     ingest,
     memberships,
     presence,
+    reports,
     sectors,
     sos,
     ws,
@@ -133,4 +134,5 @@ app.include_router(ingest.router)
 app.include_router(coverage.router)
 app.include_router(presence.router)
 app.include_router(sos.router)
+app.include_router(reports.router)
 app.include_router(ws.router)

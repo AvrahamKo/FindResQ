@@ -1,8 +1,8 @@
 # LifeSearch — Session Handover Summary
 
 **Date of handover:** 2026-08-02
-**Last commit:** `628bf82` — "Phase 5d completed: Ingest sync engine with batch upload, exponential backoff, and full-chain E2E test against real PostGIS" (Phase 6/SOS work below is uncommitted as of this handover -- commit it before starting Reports or SMS fallback).
-**Status:** Phase 6's SOS state machine sub-piece is complete and verified (Reports and SMS fallback are explicitly deferred -- see below). Git tree has uncommitted SOS changes. Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover -- **the backend server was restarted mid-session to pick up the new `/sos` route; see gotcha #12 below if a route you just added 404s.**
+**Last commit:** `b6affbd` — "Phase 6a completed: SOS state machine (trigger/acknowledge/resolve/cancel) with realtime broadcast and full E2E coverage" (Phase 6b/Reports work below is uncommitted as of this handover -- commit it before starting SMS fallback or Phase 7).
+**Status:** Phase 6b (Reports) is complete and verified. SMS fallback (6c) remains explicitly deferred. Git tree has uncommitted Reports changes. Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover -- **the backend server was restarted TWICE this session (once for `/sos`, once for `/reports`) to pick up new routes; see gotcha #12 below if a route you just added 404s.**
 
 This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/FastAPI) built through Phase 4; Flutter mobile client started in Phase 5. Read this whole file before doing anything — it front-loads verification steps that matter.
 
@@ -11,13 +11,13 @@ This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/Fa
 ## 1. Exact current state
 
 ### Test counts (verified at handover time, not from memory)
-- **Backend: 161 pytest tests passing, 0 skipped** (up from 132 at the Phase 5d handover; requires the Docker Postgres container running — see below).
-- **Mobile: 163 Dart tests passing** (`flutter test`, up from 131 at the Phase 5d handover), including three real end-to-end tests that hit the actual running backend (auth/join; the full location->buffer->sync->PostGIS chain; and now the full SOS trigger->acknowledge->resolve chain).
+- **Backend: 202 pytest tests passing, 0 skipped** (up from 161 at the Phase 6a handover; requires the Docker Postgres container running — see below).
+- **Mobile: 212 Dart tests passing** (`flutter test`, up from 163 at the Phase 6a handover), including four real end-to-end tests that hit the actual running backend (auth/join; the full location->buffer->sync->PostGIS chain; SOS trigger->acknowledge->resolve; and now report file->list->acknowledge).
 
 If a new session reports different numbers than these, trust the new run, not this document — re-verify rather than assume drift is a bug.
 
 ### Infrastructure right now
-- **Postgres**: Docker container `lifesearch-db` (`postgis/postgis:16-3.4`), defined in `backend/docker-compose.yml`. This is the **permanent** local dev database — always use it, never assume a different Postgres. Migrations 0001–0006 are applied. Bring it up with:
+- **Postgres**: Docker container `lifesearch-db` (`postgis/postgis:16-3.4`), defined in `backend/docker-compose.yml`. This is the **permanent** local dev database — always use it, never assume a different Postgres. Migrations 0001–0007 are applied. Bring it up with:
   ```bash
   cd backend && docker compose up -d
   ```
@@ -48,8 +48,8 @@ If a new session reports different numbers than these, trust the new run, not th
 | 5b | Flutter secure storage, API client, auth/join UI + Riverpod controllers | ✅ |
 | 5c | Location service (battery-aware GPS sampling) + local SQLite offline buffer + telemetry packet construction/encryption | ✅ |
 | 5d | Ingest sync engine: drains the local buffer to `/ingest` in batches, exponential backoff on failure | ✅ |
-| 6a | SOS state machine: trigger/acknowledge/resolve/cancel, realtime broadcast to the dashboard channel | ✅ **(this session)** |
-| 6b | Reports (clue/subject/hazard sightings) | ⬜ not started |
+| 6a | SOS state machine: trigger/acknowledge/resolve/cancel, realtime broadcast to the dashboard channel | ✅ |
+| 6b | Reports: encrypted/signed field reports (subject/medical/item/hazard/no-passage), ingest-style pipeline, realtime broadcast | ✅ **(this session)** |
 | 6c | SMS fallback for SOS when offline | ⬜ **deliberately deferred** (see "How to continue") |
 | 7 | BLE mesh (Android) | ⬜ not started |
 | 8 | Teardown, expiry, PII purge lifecycle | ⬜ not started |
@@ -106,6 +106,14 @@ Device registration is retry-safe by construction: the Ed25519 keypair is genera
 - **Mobile: two independent controllers, not one.** `SosController` (searcher's own trigger/cancel) does not persist across app restarts -- there is no "get my current alert" endpoint, and none is needed, since `trigger()` is idempotent server-side, so pressing the button again after a restart safely lands back on the same open alert. `SosAlertsController` (Lead/Commander's list/acknowledge/resolve) is UI-driven polling (`Timer.periodic`, same convention as `PendingApprovalView`), not a `sos_delta` WebSocket client -- no WebSocket client exists in the Flutter app yet (see gotcha #13).
 - **Known scope boundary, not a bug**: `SosAlertsController` reads the acting user's `sectorId` from their OWN `StoredSession`, so a pure Commander who has never joined any sector as a member (the backend allows this; Commanders act via `event.commander_id`, no membership required) has no client-side way to discover a sector's id today. The E2E test (`mobile/test/e2e/sos_e2e_test.dart`) works around this by having the "Commander" character also self-join their own sector purely to populate `sectorId` locally -- the actual authorization still comes from the backend's Commander check, independent of that membership. Fine for this session's scope; would need a "my events/sectors" listing endpoint + screen to close properly.
 
+### Reports: an encrypted/signed ingest-style pipeline, NOT plain CRUD
+- **Critical discovery this session, worth re-reading before touching this code**: the `reports` table already existed from **Phase 0** (`migrations/0001_init.sql`) with a schema that deliberately mirrors `track_points` -- Ed25519 `signature UNIQUE` for replay defence, `delivery_path`/`hop_count` for a future mesh relay path, a `recorded_at`/`received_at` split for an untrusted device clock. A first attempt at this phase assumed plain authenticated JSON CRUD (matching SOS's shape) and wrote a migration that tried to `CREATE TABLE reports` again -- it failed loudly (`relation already exists`) before any real damage, but **always check for an existing table before assuming a fresh one is needed**, especially for anything named in Phase 0's schema. The corrected migration (`0007_reports.sql`) only ADDS what Phase 0 didn't have (`updated_at` for the realtime checkpoint query, the NOTIFY trigger) -- it does not recreate the table.
+- **Reports use the SAME encrypted envelope construction as location telemetry** (XChaCha20-Poly1305 with the sector key, Ed25519-signed payload), just a different, variable-length wire format: `backend/app/mesh/report_format.py` / `mobile/lib/core/crypto/report_wire_format.dart` is a 24-byte fixed header (which includes a `note_len` field) followed by that many UTF-8 note bytes, then the 64-byte signature -- `peek_note_length`/`peekNoteLength` reads just that one header field so the ingest pipeline can locate the payload/signature boundary before fully unpacking anything. Submission goes through `backend/app/reports/pipeline.py` (`POST /reports`), which mirrors `app/ingest/pipeline.py`'s decrypt→verify→dedup→store shape but is much simpler (no segmentation/coverage/presence side effects).
+- **`delivery_path` is hardcoded to `'direct'`** everywhere right now -- mesh relay (Phase 7) and SMS fallback (Phase 6c) don't exist yet, but nothing in the wire format is direct-path-specific, so neither should require a format change when they land.
+- **Visibility is broader than SOS's**: `GET /sectors/{id}/reports` uses the ACCOUNT token plus `_require_sector_visibility` (reused from `routes/sectors.py`, same helper `presence.py` already uses) -- any sector member OR staff can see reports, not just Lead/Commander, because a "subject found" or "hazard" report is exactly the kind of information every searcher benefits from, unlike SOS's leadership-only acknowledge/resolve actions. Only `POST /reports/{id}/acknowledge` is Lead/Commander-gated, as a lightweight triage signal (no `resolved`/`cancelled` states -- reports don't need SOS's full state machine).
+- **Photo attachments (`photo_object_key` column) are explicitly out of scope** -- no object storage exists anywhere in this codebase; the column stays present (Phase 0's schema) but unpopulated until a later phase.
+- **Mobile grabs a fresh GPS fix at submission time** via a new `LocationSource.getCurrentPosition()` one-shot method (added alongside the existing `watch()` stream) -- a report's location is "where you are when you file it," no manual entry, no reuse of stale tracking data.
+
 ### Testing philosophy established across every phase
 **Prefer real infrastructure over mocks, and only mock at the outermost I/O boundary.** Concretely:
 - Real Postgres (Docker) for all DB-dependent backend tests — never a mocked database.
@@ -124,7 +132,10 @@ app/
   config.py                Settings (pydantic-settings, reads .env)
   db.py                    asyncpg pool
   errors.py                Typed exceptions → HTTP error envelope
-  mesh/wire_format.py      27-byte struct pack/unpack — THE wire contract
+  mesh/
+    wire_format.py          27-byte struct pack/unpack — THE location wire contract
+    report_format.py        24-byte header + variable UTF-8 note (Phase 6b) — the
+                             report wire contract, same envelope, different payload
   security/
     mesh_crypto.py         XChaCha20-Poly1305 (raw libsodium bindings)
     signatures.py          Ed25519 verify
@@ -132,10 +143,14 @@ app/
     envelope.py            Sector key wrap/unwrap at rest
   repositories/            One file per aggregate: users, devices, events, sectors,
                            sector_keys, memberships, join_codes, track_points,
-                           hex_contributions, presence, sos (Phase 6)
+                           hex_contributions, presence, sos (Phase 6a), reports (Phase 6b)
   ingest/
-    pipeline.py            The 11-stage ingest orchestrator
+    pipeline.py            The 11-stage ingest orchestrator (location points)
     geometry.py, plausibility.py, segmentation.py, coverage.py   (pure logic, no DB)
+  reports/
+    pipeline.py            Phase 6b: decrypt→verify→dedup→store for report packets --
+                            much simpler than ingest/pipeline.py, no segmentation/
+                            coverage/presence side effects
   presence/
     classifier.py          Four-state + correlated-silence heuristic (pure)
     sweep.py                DB orchestrator, periodic background task
@@ -143,16 +158,18 @@ app/
     manager.py              WebSocket connection tracking (per-process, in-memory)
     tickets.py               Short-lived single-use WS connection tickets
     listener.py              Postgres LISTEN/NOTIFY background task -- now also
-                              SOS_CHANNEL -> sos_delta (Phase 6), alongside
-                              coverage/presence
+                              SOS_CHANNEL -> sos_delta (6a) and REPORT_CHANNEL ->
+                              report_delta (6b), alongside coverage/presence
   api/routes/               One file per resource: auth, devices, events, sectors,
-                            memberships, ingest, coverage, presence, sos (Phase 6), ws
-migrations/                 0001_init → 0006_sos, applied in order
-tests/                      161 tests; conftest.py has the db_conn skip-if-unreachable
-                            fixture; test_sos_repo.py/test_sos_routes.py (Phase 6) add
-                            their own local `real_conn` fixture for cases needing
-                            `now()` to actually advance between statements -- see
-                            gotcha #14
+                            memberships, ingest, coverage, presence, sos (6a),
+                            reports (6b), ws
+migrations/                 0001_init → 0007_reports, applied in order. NOTE: the
+                            `reports` table itself is from 0001 (Phase 0) -- 0007 only
+                            ADDS to it (updated_at + NOTIFY trigger), see gotcha #15
+tests/                      202 tests; conftest.py has the db_conn skip-if-unreachable
+                            fixture; several Phase 6 files add their own local
+                            `real_conn` fixture for cases needing `now()` to actually
+                            advance between statements -- see gotcha #14
 docker-compose.yml           The permanent Postgres+PostGIS dev container
 ```
 
@@ -162,7 +179,8 @@ lib/
   main.dart                        Entry point; platform-aware base URL selection
   core/platform_base_url.dart      THE bug-fix from this session — pure, tested
   core/crypto/                     Phase 5a: wire_format, mesh_crypto, device_identity,
-                                   sodium_provider — byte-for-byte mirror of the backend
+                                   sodium_provider — byte-for-byte mirror of the backend;
+                                   report_wire_format (Phase 6b) added alongside
   core/storage/                    key_value_store (interface), secure_key_value_store
                                    (prod), secure_storage_manager, stored_models
   core/api/                        api_client, api_exception, api_models
@@ -176,9 +194,14 @@ lib/
   core/storage/telemetry_buffer_store.dart   Phase 5c: real-SQLite FIFO packet buffer
   core/sync/                       Phase 5d: sync_backoff_policy (pure), sync_state
                                    (sealed), ingest_sync_controller
-  core/sos/                        Phase 6: sos_state/sos_controller (searcher's own
+  core/sos/                        Phase 6a: sos_state/sos_controller (searcher's own
                                    trigger/cancel), sos_alerts_state/sos_alerts_controller
                                    (Lead/Commander list/acknowledge/resolve)
+  core/reports/                    Phase 6b: report_packet_builder (pack+sign+encrypt,
+                                   mirrors telemetry_packet_builder), report_state/
+                                   report_controller (file a report, one-shot), 
+                                   reports_list_state/reports_list_controller (any
+                                   sector member's list + Lead/Commander acknowledge)
   core/providers.dart              Riverpod wiring — every I/O-touching provider is
                                    overridable for tests
   app.dart                         Root widget; routes on AuthState → LoginScreen or
@@ -189,9 +212,10 @@ lib/
                                    drives BOTH LocationTrackingController and
                                    IngestSyncController from one Start/Stop pair,
                                    reached from SessionActiveView), sos_button_view
-                                   (searcher SOS, Phase 6), sos_alerts_view
-                                   (Lead/Commander SOS list, Phase 6) — both reached
-                                   from SessionActiveView
+                                   (searcher SOS, 6a), sos_alerts_view (Lead/Commander
+                                   SOS list, 6a), report_form_view (file a report, 6b),
+                                   reports_list_view (sector reports, any member, 6b) —
+                                   all reached from SessionActiveView
 test/
   core/                            Unit tests per module above
   ui/                              Widget tests (app_flow_widget_test.dart drives the
@@ -201,8 +225,10 @@ test/
   e2e/location_sync_e2e_test.dart  Phase 5d: the FULL chain against the real backend —
                                    fake GPS -> real crypto -> real SQLite buffer -> real
                                    /ingest -> real PostGIS (hexes_touched proves it)
-  e2e/sos_e2e_test.dart            Phase 6: real trigger -> real list -> real
+  e2e/sos_e2e_test.dart            Phase 6a: real trigger -> real list -> real
                                    acknowledge -> real resolve, against the real backend
+  e2e/reports_e2e_test.dart        Phase 6b: real file -> real list (any sector member)
+                                   -> real acknowledge, against the real backend
   helpers/in_memory_key_value_store.dart   Test double for KeyValueStore
   helpers/commander_fixture.dart   Shared E2E fixture (account/event/sector/join-code/
                                    approve against the real backend) -- used by both
@@ -233,6 +259,7 @@ tool/generate_interop_fixture.dart          Regenerate the Dart→Python interop
 12. **After adding a new route to `main.py`, the ALREADY-RUNNING backend server process is still serving the OLD code until restarted.** Hit this directly this session: `POST /sos` 404'd against the running server for several minutes of debugging before realizing the fix was in the code, not the test -- the uvicorn process just hadn't picked up the new router registration (it wasn't started with `--reload`). If a route you just added/changed 404s or behaves like it doesn't exist, restart the server (`netstat -ano | grep :8000` to find the PID, kill it, relaunch per Section 1's start command) before debugging further.
 13. **There is still no WebSocket client anywhere in the Flutter app.** The backend's realtime broadcast (coverage/presence/SOS deltas, all three now) is fully built and proven end-to-end from the SERVER side (`test_ws_dashboard.py`, `test_sos_routes.py::TestRealtimeBroadcast`), but nothing on the mobile side subscribes to it -- `SosAlertsView`'s Lead/Commander list uses plain REST polling (`Timer.periodic`, 5s), same convention as `PendingApprovalView`. Building a real WS client in Flutter (ticket fetch -> connect -> handle `hex_delta`/`presence_delta`/`sos_delta`) is still open work, likely warranted once there's a concrete reason to want push latency instead of a 5s poll.
 14. **Postgres's `now()` is frozen at TRANSACTION START, not per-statement** — `conftest.py`'s `db_conn` fixture wraps a whole test in ONE transaction, so two sequential inserts under `db_conn` can get the IDENTICAL `now()`-derived timestamp, breaking any assertion that depends on strict ordering or a `updated_at > checkpoint` delta query. Hit this writing `test_sos_repo.py`'s `TestListAndDeltaQueries` (two triggers landed on the same `triggered_at`, and a resolve's `updated_at` didn't compare greater than its own trigger's checkpoint). Fix: use a local `real_conn` fixture (separate `asyncpg.connect()`, no wrapping transaction, manual cleanup -- same shape as `test_ws_dashboard.py`'s) for any test that needs `now()` to actually advance between statements; `db_conn` is still correct and preferred for everything else (its transaction-per-test isolation is exactly what most tests want).
+15. **ALWAYS check whether a table already exists (especially anything named in Phase 0's schema) before writing a migration that assumes a fresh one.** This bit hard this session: `reports` looked like a natural Phase 6b table to create from scratch, but it already existed from `migrations/0001_init.sql` with a far more sophisticated design (Ed25519 signature dedup, `delivery_path`/`hop_count` for mesh, matching `track_points`) than a first, wrong assumption of plain CRUD. A migration that tried `CREATE TABLE reports` again failed loudly (`relation already exists`) -- but a few of ITS OTHER statements (the NOTIFY trigger/function, which don't check for table existence) silently succeeded against the pre-existing table before the mistake was caught, and had to be manually reverted (`DROP TRIGGER`/`DROP FUNCTION`) before writing the correct migration. If any future phase needs a table, grep all of `migrations/*.sql` for its name FIRST -- don't assume Phase 0's schema is empty just because nothing built on it yet.
 
 ---
 
@@ -249,11 +276,10 @@ cd mobile && flutter test
 If both suites are green and match (or exceed) the counts in Section 1, the project is in the state this document describes.
 
 **Then, pick up wherever the user directs — likely candidates, in the order they were originally planned:**
-- **Phase 6b (Reports)**: clue/subject/hazard sightings, structured, attached to a sector/location. Mostly CRUD + a mobile form + a Lead/Commander-side view -- the SOS work this session (migration + repo + schema + route + realtime broadcast + `sos_repo`'s idempotent-trigger pattern) is a reasonable template to follow for the backend shape, though Reports won't need the "one open per device" invariant or the session-vs-account-token split SOS has.
-- **Phase 6c (SMS fallback)**: explicitly deferred this session by user decision -- needs a real transport choice first (device-native `SmsManager` on Android vs. a server-side gateway like Twilio) before any code should be written; see the two options discussed and ask before assuming one.
-- **Phase 7+**: BLE mesh (Android), teardown/PII purge lifecycle -- still fully unstarted, matching the original architecture review's build order.
-- **A real WebSocket client in Flutter** (gotcha #13) would let `SosAlertsView` (and a future coverage/presence dashboard view) push-update instead of polling every 5s -- not urgent, but the backend has supported it since Phase 4 and now broadcasts three delta types (`hex_delta`, `presence_delta`, `sos_delta`) that nothing on the client consumes yet.
-- A few things intentionally deferred, not forgotten, if they come up: the join-code UI's battery slider is still user-entered rather than reading `BatteryPlusInfoProvider` (gotcha #6); `IngestSyncController`'s batch size (200) and intervals (30s base / 5s–5min backoff) are reasonable defaults but untuned against real cellular conditions; there's no UI surfacing of a stuck/growing buffer beyond the debug view's raw pending count; `SosAlertsController` requires the acting Lead/Commander to have a `StoredSession` of their own (gotcha-adjacent, see the SOS architectural section above) -- a "my events/sectors" endpoint + screen would close that gap for a pure Commander who never joins a sector as a member.
+- **Phase 6c (SMS fallback)**: explicitly deferred by user decision -- needs a real transport choice first (device-native `SmsManager` on Android vs. a server-side gateway like Twilio) before any code should be written; see the two options discussed and ask before assuming one. Note `delivery_path` already has a `'sms'` value reserved in both the SOS and Reports schemas -- the DATA MODEL is ready, only the actual transport is missing.
+- **Phase 7+**: BLE mesh (Android), teardown/PII purge lifecycle -- still fully unstarted, matching the original architecture review's build order. Reports' `hop_count`/`delivery_path='mesh'` columns are similarly reserved-but-unused, waiting on this phase.
+- **A real WebSocket client in Flutter** (gotcha #13) would let `SosAlertsView`/`ReportsListView` (and a future coverage/presence dashboard view) push-update instead of polling every 5s -- not urgent, but the backend has supported it since Phase 4 and now broadcasts FOUR delta types (`hex_delta`, `presence_delta`, `sos_delta`, `report_delta`) that nothing on the client consumes yet.
+- A few things intentionally deferred, not forgotten, if they come up: the join-code UI's battery slider is still user-entered rather than reading `BatteryPlusInfoProvider` (gotcha #6); `IngestSyncController`'s batch size (200) and intervals (30s base / 5s–5min backoff) are reasonable defaults but untuned against real cellular conditions; there's no UI surfacing of a stuck/growing buffer beyond the debug view's raw pending count; `SosAlertsController`/`ReportsListController` both require the acting user to have a `StoredSession` of their own (gotcha-adjacent, see the SOS architectural section above) -- a "my events/sectors" endpoint + screen would close that gap for a pure Commander who never joins a sector as a member; report photo attachments (`photo_object_key`) are unpopulated pending a real object-storage decision.
 - Note: the Android toolchain is still incomplete (`flutter doctor` reports missing `cmdline-tools`/licenses — see gotcha #2), so neither the location service nor the sync engine has been verified on a real/emulated Android device — only via `flutter test` (fake `LocationSource`/`BatteryInfoProvider`, real crypto/SQLite/HTTP) and the E2E tests against the real backend. If later work needs to verify real GPS/permission/background-execution behavior on-device, the toolchain will need fixing first.
 
 **Whatever you build next, hold it to the same standard already established**: real infrastructure over mocks wherever feasible, a genuine end-to-end test (not just unit tests) for anything crossing a real boundary (network, DB, native crypto), and don't trust a tool's own suggestion (linter, formatter) without empirically checking it preserves behavior.

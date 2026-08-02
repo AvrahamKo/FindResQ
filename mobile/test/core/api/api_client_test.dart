@@ -407,4 +407,118 @@ void main() {
       );
     });
   });
+
+  group('reports', () {
+    Map<String, dynamic> reportJson({
+      String status = 'open',
+      String? note = 'Test note',
+    }) => {
+      'id': 'report-1',
+      'sector_id': 's1',
+      'device_id': 'device-1',
+      'user_id': 'u1',
+      'kind': 'hazard',
+      'lat': 31.7715,
+      'lng': 35.2170,
+      'note': note,
+      'recorded_at': '2030-01-01T00:00:00Z',
+      'received_at': '2030-01-01T00:00:01Z',
+      'delivery_path': 'direct',
+      'status': status,
+      'acknowledged_by': null,
+      'acknowledged_at': null,
+      'updated_at': '2030-01-01T00:00:01Z',
+    };
+
+    test('submitReports sends blobs and the session bearer token', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json({
+          'accepted': 1,
+          'duplicate': 0,
+          'decrypt_failed': 0,
+          'signature_invalid': 0,
+          'wrong_device': 0,
+          'malformed': 0,
+        }, 200);
+      });
+
+      final result = await client.submitReports(
+        sessionToken: 'session-tok',
+        blobs: ['YmxvYjE='],
+      );
+
+      expect(captured!.url.path, equals('/reports'));
+      expect(captured!.headers['Authorization'], equals('Bearer session-tok'));
+      expect(
+        jsonDecode(captured!.body),
+        equals({'blobs': ['YmxvYjE=']}),
+      );
+      expect(result.accepted, equals(1));
+    });
+
+    test('listSectorReports parses a list with the account bearer token', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return http.Response(
+          jsonEncode([reportJson(), reportJson(status: 'acknowledged')]),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final reports = await client.listSectorReports(
+        accountToken: 'acct-tok',
+        sectorId: 's1',
+      );
+
+      expect(captured!.url.path, equals('/sectors/s1/reports'));
+      expect(captured!.headers['Authorization'], equals('Bearer acct-tok'));
+      expect(reports, hasLength(2));
+      expect(reports[0].note, equals('Test note'));
+      expect(reports[1].status, equals('acknowledged'));
+    });
+
+    test('acknowledgeReport posts to the report-scoped endpoint', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json(reportJson(status: 'acknowledged'), 200);
+      });
+
+      final report = await client.acknowledgeReport(
+        accountToken: 'acct-tok',
+        reportId: 'report-1',
+      );
+
+      expect(captured!.url.path, equals('/reports/report-1/acknowledge'));
+      expect(report.status, equals('acknowledged'));
+    });
+
+    test('a null note parses to null, not the string "null"', () async {
+      final client = _clientReturning((r) => _json(reportJson(note: null), 200));
+
+      final report = await client.acknowledgeReport(
+        accountToken: 'acct-tok',
+        reportId: 'report-1',
+      );
+
+      expect(report.note, isNull);
+    });
+
+    test('a 403 from listSectorReports (not a sector member) surfaces as ApiException', () async {
+      final client = _clientReturning(
+        (request) => _json({
+          'error': {'code': 'forbidden', 'message': 'you have no role in this sector'},
+        }, 403),
+      );
+
+      await expectLater(
+        client.listSectorReports(accountToken: 'tok', sectorId: 's1'),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 403)),
+      );
+    });
+  });
 }

@@ -27,6 +27,11 @@ import 'location/location_sampling_policy.dart';
 import 'location/location_tracking_controller.dart';
 import 'location/telemetry_packet_builder.dart';
 import 'location/tracking_state.dart';
+import 'reports/report_controller.dart';
+import 'reports/report_packet_builder.dart';
+import 'reports/report_state.dart';
+import 'reports/reports_list_controller.dart';
+import 'reports/reports_list_state.dart';
 import 'storage/key_value_store.dart';
 import 'storage/secure_key_value_store.dart';
 import 'storage/secure_storage_manager.dart';
@@ -160,6 +165,33 @@ final sosControllerProvider = StateNotifierProvider<SosController, SosState>((re
 final sosAlertsControllerProvider =
     StateNotifierProvider<SosAlertsController, SosAlertsState>((ref) {
       return SosAlertsController(
+        api: ref.watch(apiClientProvider),
+        storage: ref.watch(secureStorageManagerProvider),
+      );
+    });
+
+// --- Reports (Phase 6b) --------------------------------------------------
+
+final reportPacketBuilderProvider = Provider<ReportPacketBuilder>((ref) {
+  final sodium = ref.watch(sodiumProvider).requireValue;
+  return ReportPacketBuilder(ref.watch(deviceIdentityProvider), MeshCrypto(sodium));
+});
+
+final reportControllerProvider =
+    StateNotifierProvider<ReportController, ReportState>((ref) {
+      final sodium = ref.watch(sodiumProvider).requireValue;
+      return ReportController(
+        api: ref.watch(apiClientProvider),
+        storage: ref.watch(secureStorageManagerProvider),
+        location: ref.watch(locationSourceProvider),
+        packetBuilder: ref.watch(reportPacketBuilderProvider),
+        sodium: sodium,
+      );
+    });
+
+final reportsListControllerProvider =
+    StateNotifierProvider<ReportsListController, ReportsListState>((ref) {
+      return ReportsListController(
         api: ref.watch(apiClientProvider),
         storage: ref.watch(secureStorageManagerProvider),
       );

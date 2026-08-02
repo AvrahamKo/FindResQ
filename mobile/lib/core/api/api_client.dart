@@ -311,5 +311,50 @@ class ApiClient {
     return SosAlert.fromJson(_decodeObject(response));
   }
 
+  // --- Reports (Phase 6b) --------------------------------------------------
+
+  /// Uploads already-encrypted, Ed25519-signed report blobs (base64) using
+  /// the device's SECTOR SESSION token -- same auth and same encrypted
+  /// envelope shape as [ingest], just a different (variable-length) packet
+  /// type. See `backend/app/reports/pipeline.py`.
+  Future<ReportIngestResult> submitReports({
+    required String sessionToken,
+    required List<String> blobs,
+  }) async {
+    final response = await _post(
+      '/reports',
+      bearerToken: sessionToken,
+      body: {'blobs': blobs},
+    );
+    return ReportIngestResult.fromJson(_decodeObject(response));
+  }
+
+  /// List uses the ACCOUNT token -- any sector member or staff can see
+  /// reports (unlike SOS's Lead/Commander-only actions), matching the
+  /// backend's `_require_sector_visibility` check.
+  Future<List<Report>> listSectorReports({
+    required String accountToken,
+    required String sectorId,
+  }) async {
+    final response = await _get('/sectors/$sectorId/reports', bearerToken: accountToken);
+    return _decodeList(
+      response,
+    ).map((e) => Report.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  /// Acknowledge uses the ACCOUNT token plus a Lead/Commander role check on
+  /// the backend -- happens on a different device than the one that
+  /// submitted the report.
+  Future<Report> acknowledgeReport({
+    required String accountToken,
+    required String reportId,
+  }) async {
+    final response = await _post(
+      '/reports/$reportId/acknowledge',
+      bearerToken: accountToken,
+    );
+    return Report.fromJson(_decodeObject(response));
+  }
+
   void close() => _http.close();
 }
