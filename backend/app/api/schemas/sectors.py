@@ -42,6 +42,7 @@ class SectorTuningUpdate(BaseModel):
     max_gap_seconds: int | None = Field(default=None, ge=5, le=600)
     max_gap_meters: int | None = Field(default=None, ge=5, le=1000)
     min_accuracy_m: int | None = Field(default=None, ge=5, le=200)
+    max_walker_speed_mps: Decimal | None = Field(default=None, gt=0, le=20)
 
 
 class SectorOut(BaseModel):
@@ -61,6 +62,7 @@ class SectorOut(BaseModel):
     max_gap_seconds: int
     max_gap_meters: int
     min_accuracy_m: int
+    max_walker_speed_mps: Decimal
     created_at: datetime
 
 

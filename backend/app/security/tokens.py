@@ -81,6 +81,7 @@ class SessionClaims:
     membership_id: uuid.UUID
     role: str
     key_epoch: int
+    movement_mode: str
 
 
 def issue_session_token(
@@ -92,8 +93,13 @@ def issue_session_token(
     membership_id: uuid.UUID,
     role: str,
     key_epoch: int,
+    movement_mode: str,
     expires_at: datetime,
 ) -> str:
+    """`movement_mode` rides in the token (Phase 3 addition) so the ingest
+    pipeline knows walker-vs-vehicle radius without a membership lookup on
+    every batch upload -- it's fixed for the life of a session, decided once
+    at /join."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
@@ -107,6 +113,7 @@ def issue_session_token(
         "membership_id": str(membership_id),
         "role": role,
         "key_epoch": key_epoch,
+        "movement_mode": movement_mode,
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
@@ -136,6 +143,7 @@ def decode_session_token(settings: Settings, token: str) -> SessionClaims:
             membership_id=uuid.UUID(payload["membership_id"]),
             role=payload["role"],
             key_epoch=int(payload["key_epoch"]),
+            movement_mode=payload["movement_mode"],
         )
     except (KeyError, ValueError) as exc:
         raise Unauthorized("session token claims are malformed") from exc

@@ -308,6 +308,7 @@ async def claim_session(
         membership_id=membership.id,
         role=membership.role,
         key_epoch=sector.key_epoch,
+        movement_mode=membership.movement_mode,
         expires_at=membership.session_expires_at,
     )
 

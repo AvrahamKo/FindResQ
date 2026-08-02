@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db
-from .api.routes import auth, devices, events, health, memberships, sectors
+from .api.routes import auth, coverage, devices, events, health, ingest, memberships, sectors
 from .config import get_settings
 from .errors import AppError
 
@@ -67,3 +67,5 @@ app.include_router(devices.router)
 app.include_router(events.router)
 app.include_router(sectors.router)
 app.include_router(memberships.router)
+app.include_router(ingest.router)
+app.include_router(coverage.router)

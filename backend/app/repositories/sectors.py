@@ -14,7 +14,8 @@ _COLUMNS = """
     id, event_id, name, lead_user_id, status, key_epoch,
     h3_resolution, walker_radius_m, vehicle_base_radius_m,
     base_pod_day, base_pod_night, repeat_discount,
-    max_gap_seconds, max_gap_meters, min_accuracy_m, created_at
+    max_gap_seconds, max_gap_meters, min_accuracy_m, max_walker_speed_mps,
+    created_at
 """
 
 
@@ -35,6 +36,7 @@ class Sector:
     max_gap_seconds: int
     max_gap_meters: int
     min_accuracy_m: int
+    max_walker_speed_mps: Decimal
     created_at: datetime
 
 

@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: lifesearch-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lifesearch
+      POSTGRES_PASSWORD: lifesearch
+      POSTGRES_DB: lifesearch
+    ports:
+      - "5432:5432"
+    volumes:
+      - lifesearch-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lifesearch -d lifesearch"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  lifesearch-db-data:

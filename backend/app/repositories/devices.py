@@ -101,6 +101,16 @@ async def get_by_public_key(
     return _to_device(row) if row else None
 
 
+async def get_by_wire_id(conn: asyncpg.Connection, wire_id: int) -> Device | None:
+    """The ingest pipeline recovers `wire_id` from the wire-format packet
+    header (4 bytes, not the 16-byte UUID -- see mesh/wire_format.py) and
+    needs the device's public key to verify the packet's signature."""
+    row = await conn.fetchrow(
+        f"SELECT {_DEVICE_COLUMNS} FROM devices WHERE wire_id = $1", wire_id
+    )
+    return _to_device(row) if row else None
+
+
 async def create(
     conn: asyncpg.Connection,
     *,
