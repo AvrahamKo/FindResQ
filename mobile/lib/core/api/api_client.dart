@@ -231,5 +231,23 @@ class ApiClient {
     return SessionIssueResult.fromJson(_decodeObject(response));
   }
 
+  // --- Ingest (Phase 3 endpoint, Phase 5d client) -------------------------
+
+  /// Uploads a batch of already-encrypted telemetry blobs (base64) using the
+  /// device's SECTOR SESSION token, not the account token -- this is the
+  /// direct-upload path, authenticated as "this device, in this sector"
+  /// (see `backend/app/api/routes/ingest.py`'s module docstring).
+  Future<IngestResult> ingest({
+    required String sessionToken,
+    required List<String> blobs,
+  }) async {
+    final response = await _post(
+      '/ingest',
+      bearerToken: sessionToken,
+      body: {'blobs': blobs},
+    );
+    return IngestResult.fromJson(_decodeObject(response));
+  }
+
   void close() => _http.close();
 }

@@ -213,3 +213,59 @@ class SessionIssueResult {
         sector: SectorInfo.fromJson(json['sector'] as Map<String, dynamic>),
       );
 }
+
+/// Mirrors `backend/app/api/schemas/ingest.py`'s `IngestResponse` -- counts
+/// only, no per-blob outcome. That's deliberate on the backend's part: every
+/// count bucket here (accepted, duplicate, decrypt_failed, signature_invalid,
+/// wrong_device, malformed) is a TERMINAL, deterministic outcome for the
+/// exact packet the pipeline evaluated. There is no "try again later"
+/// category in a 200 response -- a decrypt failure or bad signature will
+/// fail identically on every retry, so [IngestSyncController] acknowledges
+/// (deletes from the local buffer) the WHOLE batch it sent on any 200,
+/// regardless of how the counts split, and only leaves a batch buffered for
+/// retry when the request itself didn't get a 200 at all (network failure,
+/// 5xx, timeout).
+class IngestResult {
+  final int accepted;
+  final int duplicate;
+  final int decryptFailed;
+  final int signatureInvalid;
+  final int wrongDevice;
+  final int malformed;
+  final int segmentsOpened;
+  final int segmentsExtended;
+  final int segmentsClosed;
+  final int hexesTouched;
+
+  const IngestResult({
+    required this.accepted,
+    required this.duplicate,
+    required this.decryptFailed,
+    required this.signatureInvalid,
+    required this.wrongDevice,
+    required this.malformed,
+    required this.segmentsOpened,
+    required this.segmentsExtended,
+    required this.segmentsClosed,
+    required this.hexesTouched,
+  });
+
+  /// Every blob the pipeline looked at ends up in exactly one bucket, so
+  /// this is the count of blobs actually resolved -- everything except
+  /// [accepted] is still terminal, just not newly-added data.
+  int get rejected =>
+      duplicate + decryptFailed + signatureInvalid + wrongDevice + malformed;
+
+  factory IngestResult.fromJson(Map<String, dynamic> json) => IngestResult(
+    accepted: json['accepted'] as int,
+    duplicate: json['duplicate'] as int,
+    decryptFailed: json['decrypt_failed'] as int,
+    signatureInvalid: json['signature_invalid'] as int,
+    wrongDevice: json['wrong_device'] as int,
+    malformed: json['malformed'] as int,
+    segmentsOpened: json['segments_opened'] as int,
+    segmentsExtended: json['segments_extended'] as int,
+    segmentsClosed: json['segments_closed'] as int,
+    hexesTouched: json['hexes_touched'] as int,
+  );
+}

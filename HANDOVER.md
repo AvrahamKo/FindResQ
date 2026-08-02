@@ -1,8 +1,8 @@
 # LifeSearch — Session Handover Summary
 
 **Date of handover:** 2026-08-02
-**Last commit:** `6368131` — "WIP Phase 5b: Auth & Join UI completed with passing E2E tests, debugging desktop OTP flow" (Phase 5c work below is uncommitted as of this handover -- commit it before starting Phase 5d).
-**Status:** Phase 5c complete and verified. Git tree has uncommitted Phase 5c changes. Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover.
+**Last commit:** `e1a1753` — "Phase 5c completed: Battery-aware GPS tracking service, offline SQLite telemetry buffer, encrypted 91-byte wire-format packet builder, and location status UI" (Phase 5d work below is uncommitted as of this handover -- commit it before starting Phase 6).
+**Status:** Phase 5d complete and verified. Git tree has uncommitted Phase 5d changes. Both dev servers (Postgres in Docker, FastAPI backend) are healthy and running as of this handover.
 
 This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/FastAPI) built through Phase 4; Flutter mobile client started in Phase 5. Read this whole file before doing anything — it front-loads verification steps that matter.
 
@@ -12,7 +12,7 @@ This is a life-safety SAR (Search & Rescue) coordination app. Backend (Python/Fa
 
 ### Test counts (verified at handover time, not from memory)
 - **Backend: 132 pytest tests passing, 0 skipped** (requires the Docker Postgres container running — see below).
-- **Mobile: 105 Dart tests passing** (`flutter test`, up from 71 at the Phase 5b handover), including one real end-to-end test that hits the actual running backend.
+- **Mobile: 131 Dart tests passing** (`flutter test`, up from 105 at the Phase 5c handover), including two real end-to-end tests that hit the actual running backend (one now driving the FULL chain: fake GPS -> real crypto -> real SQLite buffer -> real `/ingest` -> real PostGIS).
 
 If a new session reports different numbers than these, trust the new run, not this document — re-verify rather than assume drift is a bug.
 
@@ -46,8 +46,8 @@ If a new session reports different numbers than these, trust the new run, not th
 | 4 | Realtime dashboard: WebSocket transport, four-state presence + correlated-silence, coverage/presence REST endpoints | ✅ |
 | 5a | Flutter scaffold, Dart crypto layer (wire format, XChaCha20-Poly1305, Ed25519) mirroring the backend byte-for-byte | ✅ |
 | 5b | Flutter secure storage, API client, auth/join UI + Riverpod controllers | ✅ |
-| 5c | Location service (battery-aware GPS sampling) + local SQLite offline buffer + telemetry packet construction/encryption | ✅ **(this session)** |
-| 5d | Sync/ingest upload from the mobile client | ⬜ not started |
+| 5c | Location service (battery-aware GPS sampling) + local SQLite offline buffer + telemetry packet construction/encryption | ✅ |
+| 5d | Ingest sync engine: drains the local buffer to `/ingest` in batches, exponential backoff on failure | ✅ **(this session)** |
 | 6 | Reports + SOS state machine + SMS fallback | ⬜ not started |
 | 7 | BLE mesh (Android) | ⬜ not started |
 | 8 | Teardown, expiry, PII purge lifecycle | ⬜ not started |
@@ -88,6 +88,12 @@ Device registration is retry-safe by construction: the Ed25519 keypair is genera
 - **Telemetry packet construction mirrors the backend exactly**: `TelemetryPacketBuilder` (`mobile/lib/core/location/telemetry_packet_builder.dart`) does `pack(point) -> sign(payload) -> encrypt(payload || signature)`, producing the same 91-byte plaintext shape as `backend/app/ingest/pipeline.py`'s `_EXPECTED_PLAINTEXT_BYTES`. This is Phase 5c's contribution to the wire contract; Phase 5a's `wire_format.dart`/`mesh_crypto.dart` did the packing/crypto primitives, this phase composes them into an actual packet.
 - **The local buffer (`TelemetryBufferStore`) is real SQLite** via `sqflite_common`'s `DatabaseFactory` abstraction — the `sqflite` plugin's factory on Android/iOS, `sqflite_common_ffi`'s factory everywhere else (desktop, tests) — not a fake or an in-memory Dart structure. FIFO-capacity-bounded at 10,000 packets per the original PRD; `peekOldest`/`acknowledge` (not a destructive dequeue) so Phase 5d's upload path can retry safely on a dropped connection.
 - **`StoredDeviceIdentity` now also carries `wireId`** (previously only `deviceId`, the UUID) — added because the wire format needs the compact `devices.wire_id`, not the UUID, and it wasn't threaded through to storage before this phase. `AuthController._ensureDeviceRegistered` now saves both together via `withRegistration(...)` (was `withDeviceId(...)`).
+
+### Ingest sync: whole-batch acknowledgement, self-scheduling with backoff
+- **`IngestSyncController` (`mobile/lib/core/sync/ingest_sync_controller.dart`) acknowledges (deletes from the buffer) the WHOLE batch it sent on ANY 200 response** from `/ingest`, not just the `accepted` count. This is deliberate, not a bug: `IngestResult`'s docstring explains why -- every count bucket the backend returns (`accepted`, `duplicate`, `decrypt_failed`, `signature_invalid`, `wrong_device`, `malformed`) is a TERMINAL, deterministic outcome for that exact packet; there is no "try again later" category in a 200 response, so retrying a permanently-bad packet would just fail identically forever. A batch is only left buffered for retry when the REQUEST ITSELF didn't get a 200 at all (network failure, timeout, 5xx).
+- **Self-scheduling via `Timer`, same pattern as `LocationTrackingController`**: `start()` kicks off a loop that reschedules itself after every attempt -- a short fixed interval when healthy/idle, exponential backoff (`SyncBackoffPolicy`, pure/testable, doubling from 5s up to a 5-minute cap) after a failure. `syncOnce()` is public specifically so tests can drive one attempt directly without waiting on real timers.
+- **`stop()` is synchronous**, same reasoning as `LocationTrackingController.stop()`: cancel the `Timer` and flip `_running = false` without awaiting anything, so the UI reflects "stopped" immediately and nothing in-flight can block it.
+- **The two controllers are wired together at the UI layer, not internally**: `LocationStatusView`'s Start button calls `LocationTrackingController.start()` then `IngestSyncController.start()` -- but ONLY if tracking actually reached `TrackingActive` (checked explicitly). A real bug caught during this phase: an earlier version started sync unconditionally, so a denied location permission left the sync loop running with nothing useful to do (and, in a widget test, a `Timer` that outlived the test). Stop is unconditional both ways (stopping sync even if tracking already failed is harmless).
 
 ### Testing philosophy established across every phase
 **Prefer real infrastructure over mocks, and only mock at the outermost I/O boundary.** Concretely:
@@ -151,13 +157,17 @@ lib/
                                    (pure), telemetry_packet_builder, tracking_state
                                    (sealed), location_tracking_controller
   core/storage/telemetry_buffer_store.dart   Phase 5c: real-SQLite FIFO packet buffer
+  core/sync/                       Phase 5d: sync_backoff_policy (pure), sync_state
+                                   (sealed), ingest_sync_controller
   core/providers.dart              Riverpod wiring — every I/O-touching provider is
                                    overridable for tests
   app.dart                         Root widget; routes on AuthState → LoginScreen or
                                    JoinScreen
   ui/screens/                      phone_entry_view, otp_entry_view, login_screen,
                                    join_code_view, membership_status_view, join_screen,
-                                   location_status_view (Phase 5c debug/ops screen,
+                                   location_status_view (Phase 5c/5d debug/ops screen —
+                                   drives BOTH LocationTrackingController and
+                                   IngestSyncController from one Start/Stop pair,
                                    reached from SessionActiveView)
 test/
   core/                            Unit tests per module above
@@ -165,7 +175,17 @@ test/
                                    ENTIRE UI flow through real screens)
   e2e/auth_join_e2e_test.dart      Real end-to-end test against the real backend —
                                    run this first if anything auth/join-related seems off
+  e2e/location_sync_e2e_test.dart  Phase 5d: the FULL chain against the real backend —
+                                   fake GPS -> real crypto -> real SQLite buffer -> real
+                                   /ingest -> real PostGIS (hexes_touched proves it)
   helpers/in_memory_key_value_store.dart   Test double for KeyValueStore
+  helpers/commander_fixture.dart   Shared E2E fixture (account/event/sector/join-code/
+                                   approve against the real backend) -- used by both
+                                   e2e test files, factored out in Phase 5d to avoid
+                                   duplicating it
+  helpers/fake_location_source.dart, fake_battery_info_provider.dart   Test doubles for
+                                   LocationSource/BatteryInfoProvider (real GPS/battery
+                                   have no host-process equivalent)
 tool/generate_interop_fixture.dart          Regenerate the Dart→Python interop fixture
                                             if the wire format ever changes
 ```
@@ -183,6 +203,8 @@ tool/generate_interop_fixture.dart          Regenerate the Dart→Python interop
 7. **`MembershipInfo.role`/`movementMode` from the backend must be threaded through the join flow explicitly** — an earlier draft of `JoinController` hardcoded placeholder values instead of using the real fields already returned by `GET /memberships/{id}`; this was caught and fixed, but if you're extending the join flow, make sure new state transitions keep passing these through rather than reintroducing placeholders.
 8. **`sqflite_common_ffi`'s isolate-backed `databaseFactoryFfi` does not work inside `testWidgets`** (Flutter's widget-test zone) — its background isolate's replies arrive via the real event loop in a way `tester.pump()` never observes, so any `await` on it can hang indefinitely while pumps keep getting issued. Use `databaseFactoryFfiNoIsolate` (same package) for any widget test that touches `TelemetryBufferStore`; the plain, non-widget `test()`-based controller test uses the normal isolate-backed `databaseFactoryFfi` instead, since a bare `test()` isn't wrapped in that zone. See `mobile/test/ui/screens/location_status_view_test.dart`'s `setUp` for the concrete pattern.
 9. **`TelemetryBufferStore` opens with `singleInstance: false`.** `sqflite_common`'s factories cache open connections by literal path string when `singleInstance` isn't set to false — every test using the literal `inMemoryDatabasePath` (`':memory:'`) would otherwise silently share ONE underlying connection across different `TelemetryBufferStore` instances, and close()/open() timing races between tests caused real (previously debugged) cross-test data leakage. If you ever see a `TelemetryBufferStore`-related test with an inexplicably wrong row count, check this first.
+10. **A real `Timer`-owning controller (like `IngestSyncController`) must be stopped as the LAST STATEMENT inside the `testWidgets` body itself, not via `tearDown` or `addTearDown`.** Flutter's test binding asserts no `Timer` is still pending as part of `_runTestBody`, which runs BEFORE both `tearDown` and `addTearDown` callbacks get a chance to fire — so `container.dispose()` (which would otherwise cancel the timer through the controller's own `dispose()`) is always too late if only called from `tearDown`. See `location_status_view_test.dart`'s `stopControllers()` helper and its usage for the working pattern.
+11. **A bare `await Future.delayed(...)` with no `tester.pump()` calls around it can hang indefinitely inside `testWidgets`** — real Timer/event-loop progress in that test binding only reliably happens interleaved with `pump()` calls. Any "wait for something timer-driven to happen" in a widget test must go through a `pump()` loop (see `pumpUntilFound` in `location_status_view_test.dart`), never a standalone delay. This is a DIFFERENT issue from gotcha #10 (or from Phase 5c's `sqflite_common_ffi`-under-FakeAsync gotcha) but produces the same symptom (a hang), so if a widget test hangs, check for a bare `Future.delayed` first — it's the cheapest thing to rule out.
 
 ---
 
@@ -199,8 +221,8 @@ cd mobile && flutter test
 If both suites are green and match (or exceed) the counts in Section 1, the project is in the state this document describes.
 
 **Then, pick up wherever the user directs — likely candidates, in the order they were originally planned:**
-- **Phase 5d**: Wiring `TelemetryBufferStore` to `/ingest` — `LocationTrackingController` already buffers real encrypted packets (`peekOldest`/`acknowledge` are the intended read/ack API); this phase batches them and calls the real `/ingest` endpoint (already built in Phase 3) from the Dart client for the first time, handling partial-batch acceptance and retry on a dropped connection.
-- **Phase 6+**: Reports/SOS, BLE mesh, teardown/PII lifecycle — all still fully unstarted, matching the original architecture review's build order.
-- Note: the Android toolchain is still incomplete (`flutter doctor` reports missing `cmdline-tools`/licenses — see gotcha #2), so Phase 5c's location service has only been verified via `flutter test` (fake `LocationSource`/`BatteryInfoProvider`, real crypto/SQLite), never on a real/emulated Android device. If Phase 5d or later work needs to verify real GPS/permission behavior on-device, the toolchain will need fixing first.
+- **Phase 6+**: Reports/SOS state machine + SMS fallback, BLE mesh (Android), teardown/PII purge lifecycle — all still fully unstarted, matching the original architecture review's build order. The full client-side data path (GPS -> buffer -> `/ingest` -> PostGIS) is now proven end-to-end, so Phase 6's SOS flow can build on `IngestSyncController`/`LocationTrackingController` rather than inventing a new upload path.
+- A few things intentionally deferred, not forgotten, if they come up: the join-code UI's battery slider is still user-entered rather than reading `BatteryPlusInfoProvider` (gotcha #6); `IngestSyncController`'s batch size (200) and intervals (30s base / 5s–5min backoff) are reasonable defaults but untuned against real cellular conditions; there's no UI surfacing of a stuck/growing buffer (e.g. "10,000 packets, buffer full, oldest data being dropped") beyond the debug view's raw pending count.
+- Note: the Android toolchain is still incomplete (`flutter doctor` reports missing `cmdline-tools`/licenses — see gotcha #2), so neither the location service nor the sync engine has been verified on a real/emulated Android device — only via `flutter test` (fake `LocationSource`/`BatteryInfoProvider`, real crypto/SQLite/HTTP) and the E2E tests against the real backend. If later work needs to verify real GPS/permission/background-execution behavior on-device, the toolchain will need fixing first.
 
 **Whatever you build next, hold it to the same standard already established**: real infrastructure over mocks wherever feasible, a genuine end-to-end test (not just unit tests) for anything crossing a real boundary (network, DB, native crypto), and don't trust a tool's own suggestion (linter, formatter) without empirically checking it preserves behavior.

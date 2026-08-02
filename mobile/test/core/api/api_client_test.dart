@@ -215,6 +215,56 @@ void main() {
     });
   });
 
+  group('ingest', () {
+    test('sends blobs and the session bearer token, parses counts', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json({
+          'accepted': 2,
+          'duplicate': 1,
+          'decrypt_failed': 0,
+          'signature_invalid': 0,
+          'wrong_device': 0,
+          'malformed': 0,
+          'segments_opened': 1,
+          'segments_extended': 0,
+          'segments_closed': 0,
+          'hexes_touched': 3,
+        }, 200);
+      });
+
+      final result = await client.ingest(
+        sessionToken: 'session-tok',
+        blobs: ['YmxvYjE=', 'YmxvYjI='],
+      );
+
+      expect(captured!.url.path, equals('/ingest'));
+      expect(captured!.headers['Authorization'], equals('Bearer session-tok'));
+      expect(
+        jsonDecode(captured!.body),
+        equals({'blobs': ['YmxvYjE=', 'YmxvYjI=']}),
+      );
+      expect(result.accepted, equals(2));
+      expect(result.duplicate, equals(1));
+      expect(result.rejected, equals(1));
+      expect(result.hexesTouched, equals(3));
+    });
+
+    test('a 401 (e.g. expired session) surfaces as ApiException', () async {
+      final client = _clientReturning(
+        (request) => _json({
+          'error': {'code': 'unauthorized', 'message': 'session expired'},
+        }, 401),
+      );
+
+      await expectLater(
+        client.ingest(sessionToken: 'stale-tok', blobs: ['YmxvYg==']),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 401)),
+      );
+    });
+  });
+
   group('claimSession', () {
     test('parses the sector key and sector info', () async {
       final client = _clientReturning(

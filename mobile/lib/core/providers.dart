@@ -31,6 +31,8 @@ import 'storage/key_value_store.dart';
 import 'storage/secure_key_value_store.dart';
 import 'storage/secure_storage_manager.dart';
 import 'storage/telemetry_buffer_store.dart';
+import 'sync/ingest_sync_controller.dart';
+import 'sync/sync_state.dart';
 
 /// Overridden in `main.dart` with the real backend URL, and in tests with
 /// whatever the test harness is actually listening on.
@@ -128,5 +130,16 @@ final locationTrackingControllerProvider =
         buffer: ref.watch(telemetryBufferStoreProvider),
         storage: ref.watch(secureStorageManagerProvider),
         sodium: sodium,
+      );
+    });
+
+// --- Ingest sync (Phase 5d) --------------------------------------------
+
+final ingestSyncControllerProvider =
+    StateNotifierProvider<IngestSyncController, SyncState>((ref) {
+      return IngestSyncController(
+        api: ref.watch(apiClientProvider),
+        storage: ref.watch(secureStorageManagerProvider),
+        buffer: ref.watch(telemetryBufferStoreProvider),
       );
     });
