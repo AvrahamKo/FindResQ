@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 import asyncpg
 
 from ..repositories import hex_contributions as hex_contrib_repo
+from ..repositories import presence as presence_repo
 from ..repositories import track_points as track_points_repo
 from ..repositories.sectors import Sector
 from ..security import mesh_crypto, signatures
@@ -130,6 +131,22 @@ async def ingest_batch(
 
     if not decrypted:
         return IngestResult(packets=outcome)
+
+    # A genuinely verified packet proves the device transmitted right now,
+    # regardless of whether its content turns out to be new or a duplicate
+    # resubmission -- so presence is updated from `decrypted`, before dedup
+    # filtering, and unconditionally on every path past this point.
+    latest = max(decrypted, key=lambda p: p.recorded_at_ms)
+    await presence_repo.upsert_active(
+        conn,
+        sector_id=sector.id,
+        device_id=device_id,
+        last_point_at=_to_datetime(latest.recorded_at_ms),
+        last_lat=latest.lat,
+        last_lng=latest.lng,
+        last_battery_pct=latest.battery_pct,
+        last_delivery_path="direct",
+    )
 
     # --- Stage 6: signature dedup, as a batch pre-filter ----------------
     existing = await conn.fetch(

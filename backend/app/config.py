@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     battery_warn_threshold_pct: int = 30
     battery_block_threshold_pct: int = 15
 
+    presence_sweep_interval_seconds: int = 30
+
     @property
     def is_local(self) -> bool:
         return self.env == "local"

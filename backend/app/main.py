@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -11,9 +12,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db
-from .api.routes import auth, coverage, devices, events, health, ingest, memberships, sectors
+from .api.routes import (
+    auth,
+    coverage,
+    devices,
+    events,
+    health,
+    ingest,
+    memberships,
+    presence,
+    sectors,
+    ws,
+)
 from .config import get_settings
 from .errors import AppError
+from .presence.sweep import sweep_all_open_sectors
+from .realtime.listener import RealtimeListener
+from .realtime.manager import ConnectionManager
+from .realtime.tickets import TicketStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,14 +38,45 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _presence_sweep_loop(interval_seconds: int) -> None:
+    while True:
+        try:
+            async with db.get_pool().acquire() as conn:
+                changed = await sweep_all_open_sectors(conn)
+            if changed:
+                logger.info("presence sweep: %d device(s) changed state", changed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("presence sweep tick failed")
+        await asyncio.sleep(interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    await db.connect(settings)
+    pool = await db.connect(settings)
+
+    app.state.connection_manager = ConnectionManager()
+    app.state.ticket_store = TicketStore()
+
+    listener = RealtimeListener(settings.database_url, pool, app.state.connection_manager)
+    await listener.start()
+
+    sweep_task = asyncio.create_task(
+        _presence_sweep_loop(settings.presence_sweep_interval_seconds)
+    )
+
     logger.info("LifeSearch API started (env=%s)", settings.env)
     try:
         yield
     finally:
+        sweep_task.cancel()
+        try:
+            await sweep_task
+        except asyncio.CancelledError:
+            pass
+        await listener.stop()
         await db.disconnect()
 
 
@@ -69,3 +116,5 @@ app.include_router(sectors.router)
 app.include_router(memberships.router)
 app.include_router(ingest.router)
 app.include_router(coverage.router)
+app.include_router(presence.router)
+app.include_router(ws.router)
