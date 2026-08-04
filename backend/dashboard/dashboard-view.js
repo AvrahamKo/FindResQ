@@ -28,6 +28,8 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       <div class="side-panel right">
         <h2>Open SOS alerts</h2>
         <div id="sos-list"></div>
+        <h2>Pending Approvals</h2>
+        <div id="pending-list"></div>
         <h2>Unacknowledged reports</h2>
         <div id="report-list"></div>
       </div>
@@ -45,6 +47,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   const sectors = new Map(); // sectorId -> SectorOut
   const openSos = new Map(); // alertId -> { alert, sectorId }
   const pendingReports = new Map(); // reportId -> { report, sectorId }
+  const pendingMemberships = new Map(); // membershipId -> { membership, sectorId }
   const joinCodes = new Map(); // sectorId -> JoinCodeOut (only ones created THIS session -- see api.js)
 
   function sectorName(sectorId) {
@@ -255,6 +258,65 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     }
   }
 
+  function renderPendingApprovals() {
+    const el = root.querySelector("#pending-list");
+    const items = [...pendingMemberships.values()].sort(
+      (a, b) => new Date(a.membership.created_at) - new Date(b.membership.created_at)
+    );
+    if (items.length === 0) {
+      el.innerHTML = '<div class="empty-hint">No pending approvals.</div>';
+      return;
+    }
+    el.innerHTML = "";
+    for (const { membership, sectorId } of items) {
+      const card = document.createElement("div");
+      card.className = "alert-card approval";
+      // No user-lookup endpoint exists server-side -- only the raw user_id
+      // is available, not a display name.
+      const battery =
+        membership.battery_at_join != null ? `${membership.battery_at_join}% battery` : "battery unknown";
+      card.innerHTML = `
+        <div><strong>${membership.movement_mode}</strong> · ${sectorName(sectorId)}</div>
+        <div class="meta">user ${membership.user_id.slice(0, 8)} · ${battery}${membership.powerbank_attested ? " · powerbank attested" : ""}</div>
+        <div class="actions"></div>
+      `;
+      const actions = card.querySelector(".actions");
+
+      const approveBtn = document.createElement("button");
+      approveBtn.textContent = "Approve";
+      approveBtn.addEventListener("click", async () => {
+        approveBtn.disabled = true;
+        try {
+          await api.approveMembership(membership.id);
+          pendingMemberships.delete(membership.id);
+          renderPendingApprovals();
+        } catch (e) {
+          alert_error(e);
+          approveBtn.disabled = false;
+        }
+      });
+      actions.appendChild(approveBtn);
+
+      const rejectBtn = document.createElement("button");
+      rejectBtn.className = "secondary";
+      rejectBtn.textContent = "Reject";
+      rejectBtn.addEventListener("click", async () => {
+        rejectBtn.disabled = true;
+        try {
+          await api.rejectMembership(membership.id);
+          pendingMemberships.delete(membership.id);
+          renderPendingApprovals();
+        } catch (e) {
+          alert_error(e);
+          rejectBtn.disabled = false;
+        }
+      });
+      actions.appendChild(rejectBtn);
+
+      el.appendChild(card);
+    }
+  }
+
   function applySosUpdate(sectorId, alerts) {
     for (const alert of alerts) {
       if (alert.status === "active" || alert.status === "acknowledged") {
@@ -279,20 +341,38 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     renderReportList();
   }
 
+  function applyPendingMemberships(sectorId, memberships) {
+    for (const [id, entry] of pendingMemberships) {
+      if (entry.sectorId === sectorId && !memberships.some((m) => m.id === id)) {
+        pendingMemberships.delete(id);
+      }
+    }
+    for (const m of memberships) {
+      if (m.status === "pending") {
+        pendingMemberships.set(m.id, { membership: m, sectorId });
+      } else {
+        pendingMemberships.delete(m.id);
+      }
+    }
+    renderPendingApprovals();
+  }
+
   async function loadSector(sector) {
     sectors.set(sector.id, sector);
     map.addSector(sector);
     renderSectorList();
 
-    const [hexes, presence, sos, reports] = await Promise.all([
+    const [hexes, presence, sos, reports, memberships] = await Promise.all([
       api.getHexes(sector.id).catch(() => ({ hexes: [] })),
       api.getPresence(sector.id).catch(() => []),
       api.getSos(sector.id).catch(() => []),
       api.getReports(sector.id).catch(() => []),
+      api.listMemberships(sector.id, "pending").catch(() => []),
     ]);
     map.applyHexes(sector.id, hexes.hexes || hexes);
     map.applyPresence(sector.id, presence);
     applySosUpdate(sector.id, sos);
+    applyPendingMemberships(sector.id, memberships);
     applyReportUpdate(sector.id, reports);
   }
 
@@ -415,10 +495,28 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   });
   socket.start();
 
+  // Pending-membership polling: no membership_delta exists over the WS
+  // socket (only hex/presence/sos/report do -- see realtime/listener.py),
+  // so this is polled instead, same 5s convention as the mobile app's own
+  // Lead/Commander approval screens.
+  const pendingApprovalsPoll = setInterval(async () => {
+    for (const sector of sectors.values()) {
+      try {
+        const memberships = await api.listMemberships(sector.id, "pending");
+        applyPendingMemberships(sector.id, memberships);
+      } catch (e) {
+        // transient poll failure -- next tick will retry
+      }
+    }
+  }, 5000);
+
   // Torn down when the hash router re-renders into a different view.
   window.addEventListener(
     "hashchange",
-    () => socket.stop(),
+    () => {
+      socket.stop();
+      clearInterval(pendingApprovalsPoll);
+    },
     { once: true }
   );
 }

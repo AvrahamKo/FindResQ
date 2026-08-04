@@ -74,6 +74,19 @@ export const api = {
   revokeJoinCode: (sectorId, code) =>
     request("DELETE", `/sectors/${sectorId}/join-codes/${code}`),
 
+  // Actual routes are /sectors/{id}/memberships (not /members) and
+  // /memberships/{id}/approve|reject (membership id, not user id) -- see
+  // app/api/routes/memberships.py. No membership_delta over the WS socket
+  // exists (only hex/presence/sos/report do), so the dashboard has to poll
+  // this, same convention as the mobile app's own Lead/Commander screens.
+  listMemberships: (sectorId, statusFilter) =>
+    request(
+      "GET",
+      `/sectors/${sectorId}/memberships${statusFilter ? `?status_filter=${statusFilter}` : ""}`
+    ),
+  approveMembership: (membershipId) => request("POST", `/memberships/${membershipId}/approve`),
+  rejectMembership: (membershipId) => request("POST", `/memberships/${membershipId}/reject`),
+
   getHexes: (sectorId) => request("GET", `/sectors/${sectorId}/hexes`),
   getPresence: (sectorId) => request("GET", `/sectors/${sectorId}/presence`),
   getSos: (sectorId) => request("GET", `/sectors/${sectorId}/sos`),
