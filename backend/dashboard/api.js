@@ -86,6 +86,17 @@ export const api = {
     ),
   approveMembership: (membershipId) => request("POST", `/memberships/${membershipId}/approve`),
   rejectMembership: (membershipId) => request("POST", `/memberships/${membershipId}/reject`),
+  // Revoke ends an APPROVED membership (409s on any other status). It does
+  // not re-key the sector -- the removed device keeps the sector key until
+  // the epoch is bumped -- but its next request fails the membership check.
+  revokeMembership: (membershipId) => request("POST", `/memberships/${membershipId}/revoke`),
+
+  // COMMANDER-ONLY (require_commander, not lead-or-commander), and the target
+  // must already hold an approved membership in this sector -- promotion runs
+  // through the same join+approve path as any volunteer, this only elevates.
+  // Demotes whoever currently leads the sector in the same transaction.
+  assignLead: (sectorId, userId) =>
+    request("POST", `/sectors/${sectorId}/lead`, { body: { user_id: userId } }),
 
   getHexes: (sectorId) => request("GET", `/sectors/${sectorId}/hexes`),
   getPresence: (sectorId) => request("GET", `/sectors/${sectorId}/presence`),

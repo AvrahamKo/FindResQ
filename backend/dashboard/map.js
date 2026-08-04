@@ -49,7 +49,16 @@ class SectorLayers {
 
 export class TacticalMap {
   constructor(containerId) {
-    this.map = L.map(containerId).setView([31.5, 34.8], 12);
+    // zoomAnimation is OFF deliberately. Leaflet's animated path defers the
+    // actual view change into a requestAnimationFrame callback and returns
+    // "handled" to setView, so in any tab where rAF is throttled or not
+    // running (a backgrounded dashboard, a headless/non-compositing browser)
+    // fitBounds silently does nothing -- the map just never moves, with no
+    // error. It can also wedge permanently: setView bails early forever if
+    // `_animatingZoom` is left true by a transitionend that never fires.
+    // "Click a sector, map doesn't move" is a bad failure for a tactical
+    // map, so we trade the glide for a deterministic synchronous snap.
+    this.map = L.map(containerId, { zoomAnimation: false }).setView([31.5, 34.8], 12);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "&copy; OpenStreetMap contributors",
       maxZoom: 19,
@@ -57,6 +66,7 @@ export class TacticalMap {
 
     this.sectors = new Map(); // sectorId -> SectorLayers
     this._paletteIndex = 0;
+    this._selectedSectorId = null;
 
     this._drawing = false;
     this._drawPoints = [];
@@ -72,7 +82,7 @@ export class TacticalMap {
     return color;
   }
 
-  addSector(sector) {
+  addSector(sector, { onClick } = {}) {
     if (this.sectors.has(sector.id)) return;
     const color = this.sectorColor(sector.id);
     const layers = new SectorLayers(color);
@@ -81,8 +91,51 @@ export class TacticalMap {
     })
       .bindTooltip(sector.name)
       .addTo(this.map);
+    // Clicking the polygon itself selects the sector, same as clicking its
+    // row in the sidebar -- but only when not mid-draw, since drawing needs
+    // raw map clicks and a stray polygon hit would otherwise hijack them.
+    if (onClick) {
+      layers.boundaryLayer.on("click", (e) => {
+        if (this._drawing) return;
+        L.DomEvent.stop(e);
+        onClick(sector.id);
+      });
+    }
     this.sectors.set(sector.id, layers);
-    this._fitAll();
+    this._applySelectionStyling();
+    // Deliberately does NOT fit here: sectors are added in a batch at load,
+    // and one fitBounds per sector means N-1 wasted view changes. The caller
+    // fits once, when it knows the batch is done.
+  }
+
+  // ---- Selection / focus ----
+
+  focusSector(sectorId) {
+    const layers = this.sectors.get(sectorId);
+    if (!layers) return;
+    this._selectedSectorId = sectorId;
+    this._applySelectionStyling();
+    const bounds = layers.boundaryLayer.getBounds();
+    if (bounds.isValid()) this.map.fitBounds(bounds, { padding: [60, 60] });
+  }
+
+  clearFocus() {
+    this._selectedSectorId = null;
+    this._applySelectionStyling();
+    this.fitAll();
+  }
+
+  _applySelectionStyling() {
+    for (const [id, layers] of this.sectors) {
+      const isSelected = id === this._selectedSectorId;
+      const dimmed = this._selectedSectorId !== null && !isSelected;
+      layers.boundaryLayer.setStyle({
+        color: layers.color,
+        weight: isSelected ? 3 : dimmed ? 1 : 2,
+        opacity: dimmed ? 0.35 : 1,
+        fillOpacity: isSelected ? 0.1 : dimmed ? 0.01 : 0.03,
+      });
+    }
   }
 
   removeSector(sectorId) {
@@ -96,15 +149,15 @@ export class TacticalMap {
     this.sectors.delete(sectorId);
   }
 
-  _fitAll() {
-    const bounds = [];
+  // Fits every sector into view. Public: the caller decides when a batch of
+  // addSector() calls is finished (see addSector).
+  fitAll() {
+    const combined = L.latLngBounds([]);
     for (const layers of this.sectors.values()) {
       const b = layers.boundaryLayer.getBounds();
-      if (b.isValid()) bounds.push(b);
+      if (b.isValid()) combined.extend(b);
     }
-    if (bounds.length === 0) return;
-    let combined = bounds[0];
-    for (const b of bounds.slice(1)) combined = combined.extend(b);
+    if (!combined.isValid()) return;
     this.map.fitBounds(combined, { padding: [40, 40] });
   }
 

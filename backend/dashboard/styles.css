@@ -138,18 +138,47 @@ a { color: var(--accent); }
 }
 .side-panel h2:first-child { margin-top: 0; }
 
+/* ---- Sector list (deliberately minimal: name + indicators only; everything
+   else lives in the focused sector panel on the right) ---- */
 .sector-row {
-  padding: 6px 4px; border-radius: 4px; font-size: 13px;
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  padding: 7px 8px; margin-bottom: 2px;
+  border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: var(--text);
+  font-size: 13px; font-weight: 400; cursor: pointer;
 }
 .sector-row:hover { background: #1f2732; }
-.sector-row-top { display: flex; align-items: center; gap: 8px; }
-.sector-name { flex: 1; }
+.sector-row.selected {
+  background: #1f2732;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.sector-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sector-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
 
-.sector-status-line {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-  margin: 4px 0 0 18px;
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.status-dot.status-open { background: var(--ok); }
+.status-dot.status-paused { background: var(--warn); }
+.status-dot.status-closed { background: var(--text-dim); }
+
+.pending-badge {
+  background: #9b59b6; color: white;
+  font-size: 10px; font-weight: 700;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
 }
+
+/* ---- Focused sector management panel ---- */
+.sector-panel-head { margin-bottom: 16px; }
+.sector-panel-head button { padding: 3px 8px; font-size: 11px; }
+.sector-panel-title {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px; font-size: 15px; font-weight: 700;
+}
+
 .sector-status-label {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
   padding: 2px 6px; border-radius: 3px; font-weight: 700;
@@ -157,14 +186,33 @@ a { color: var(--accent); }
 .sector-status-label.status-open { background: rgba(46, 204, 113, 0.15); color: var(--ok); }
 .sector-status-label.status-paused { background: rgba(241, 196, 15, 0.15); color: var(--warn); }
 .sector-status-label.status-closed { background: rgba(139, 148, 158, 0.15); color: var(--text-dim); }
-.sector-status-line .status-toggle-btn { padding: 2px 8px; font-size: 11px; }
 
-.sector-join-code {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-  margin: 6px 0 4px 18px;
+#recruit-control, #joincode-control {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
 }
-.sector-join-code .gen-code-btn { padding: 3px 8px; font-size: 11px; }
-.sector-join-code button.secondary { padding: 2px 8px; font-size: 11px; }
+#recruit-control button, #joincode-control button { padding: 3px 10px; font-size: 11px; }
+
+.panel-hint { flex-basis: 100%; font-size: 11px; color: var(--text-dim); }
+.panel-hint.warn { color: var(--warn); }
+
+.member-card {
+  background: #1f2732; border: 1px solid var(--panel-border); border-radius: 6px;
+  padding: 10px; margin-bottom: 8px; font-size: 13px;
+}
+.member-head { display: flex; align-items: center; gap: 8px; }
+.member-id {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  flex: 1;
+}
+.lead-badge {
+  background: rgba(63, 169, 245, 0.18); color: var(--accent);
+  font-size: 9px; font-weight: 800; letter-spacing: 0.08em;
+  padding: 2px 6px; border-radius: 3px;
+}
+.member-card .meta { color: var(--text-dim); font-size: 11px; margin: 4px 0 8px; }
+.member-card .actions { display: flex; gap: 6px; }
+.member-card .actions button { padding: 3px 10px; font-size: 11px; }
+
 .join-code-badge {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-weight: 700;
@@ -176,7 +224,8 @@ a { color: var(--accent); }
   padding: 2px 8px;
   color: var(--ok);
 }
-.join-code-meta { font-size: 10px; color: var(--text-dim); }
+/* flex-basis forces its own line under the code+revoke row */
+.join-code-meta { flex-basis: 100%; font-size: 10px; color: var(--text-dim); }
 
 #map { width: 100%; height: 100%; background: #0a0e14; }
 
