@@ -1,0 +1,319 @@
+import { api } from "./api.js";
+import { DashboardSocket } from "./ws.js";
+import { TacticalMap, PRESENCE_COLORS, REPORT_KIND_STYLE } from "./map.js";
+
+export async function renderDashboard(root, { eventId, onLogout }) {
+  root.innerHTML = `
+    <div class="top-bar">
+      <button class="secondary" id="back">&larr; Events</button>
+      <div class="title" id="event-name">Loading…</div>
+      <span class="dot" id="conn-dot"></span>
+      <span id="conn-label" style="font-size:12px;color:var(--text-dim)">connecting…</span>
+      <div class="spacer"></div>
+      <button class="secondary" id="logout">Log out</button>
+    </div>
+    <div class="dashboard">
+      <div class="side-panel">
+        <h2>Sectors</h2>
+        <div id="sector-list"></div>
+        <div class="draw-controls" id="draw-controls">
+          <button class="secondary" id="new-sector-btn">+ New sector</button>
+        </div>
+        <h2>Legend</h2>
+        <div id="legend"></div>
+      </div>
+      <div id="map"></div>
+      <div class="side-panel right">
+        <h2>Open SOS alerts</h2>
+        <div id="sos-list"></div>
+        <h2>Unacknowledged reports</h2>
+        <div id="report-list"></div>
+      </div>
+    </div>
+  `;
+
+  root.querySelector("#back").addEventListener("click", () => {
+    location.hash = "#/events";
+  });
+  root.querySelector("#logout").addEventListener("click", onLogout);
+
+  renderLegend(root.querySelector("#legend"));
+
+  const map = new TacticalMap("map");
+  const sectors = new Map(); // sectorId -> SectorOut
+  const openSos = new Map(); // alertId -> { alert, sectorId }
+  const pendingReports = new Map(); // reportId -> { report, sectorId }
+
+  function sectorName(sectorId) {
+    const s = sectors.get(sectorId);
+    return s ? s.name : sectorId.slice(0, 8);
+  }
+
+  function renderSectorList() {
+    const el = root.querySelector("#sector-list");
+    el.innerHTML = "";
+    for (const sector of sectors.values()) {
+      const row = document.createElement("div");
+      row.className = "sector-row";
+      const color = map.sectorColor(sector.id);
+      row.innerHTML = `<span class="sector-swatch" style="background:${color}"></span><span>${sector.name}</span>`;
+      el.appendChild(row);
+    }
+    if (sectors.size === 0) {
+      el.innerHTML = '<div class="empty-hint">No sectors yet.</div>';
+    }
+  }
+
+  function renderSosList() {
+    const el = root.querySelector("#sos-list");
+    const items = [...openSos.values()].sort(
+      (a, b) => new Date(b.alert.triggered_at) - new Date(a.alert.triggered_at)
+    );
+    if (items.length === 0) {
+      el.innerHTML = '<div class="empty-hint">No open alerts.</div>';
+      return;
+    }
+    el.innerHTML = "";
+    for (const { alert, sectorId } of items) {
+      const card = document.createElement("div");
+      card.className = "alert-card sos";
+      card.innerHTML = `
+        <div><strong>SOS</strong> · ${sectorName(sectorId)}</div>
+        <div class="meta">${alert.status} · ${new Date(alert.triggered_at).toLocaleTimeString()}</div>
+        <div class="actions"></div>
+      `;
+      const actions = card.querySelector(".actions");
+      if (alert.status === "active") {
+        const ackBtn = document.createElement("button");
+        ackBtn.textContent = "Acknowledge";
+        ackBtn.addEventListener("click", async () => {
+          ackBtn.disabled = true;
+          try {
+            await api.acknowledgeSos(alert.id);
+          } catch (e) {
+            alert_error(e);
+            ackBtn.disabled = false;
+          }
+        });
+        actions.appendChild(ackBtn);
+      }
+      const resolveBtn = document.createElement("button");
+      resolveBtn.className = "secondary";
+      resolveBtn.textContent = "Resolve";
+      resolveBtn.addEventListener("click", async () => {
+        resolveBtn.disabled = true;
+        try {
+          await api.resolveSos(alert.id);
+        } catch (e) {
+          alert_error(e);
+          resolveBtn.disabled = false;
+        }
+      });
+      actions.appendChild(resolveBtn);
+      el.appendChild(card);
+    }
+  }
+
+  function renderReportList() {
+    const el = root.querySelector("#report-list");
+    const items = [...pendingReports.values()].sort(
+      (a, b) => new Date(b.report.received_at) - new Date(a.report.received_at)
+    );
+    if (items.length === 0) {
+      el.innerHTML = '<div class="empty-hint">No unacknowledged reports.</div>';
+      return;
+    }
+    el.innerHTML = "";
+    for (const { report, sectorId } of items) {
+      const card = document.createElement("div");
+      card.className = "alert-card report";
+      card.innerHTML = `
+        <div><strong>${report.kind}</strong> · ${sectorName(sectorId)}</div>
+        <div class="meta">${new Date(report.received_at).toLocaleTimeString()}${report.note ? " · " + escapeHtml(report.note) : ""}</div>
+        <div class="actions"></div>
+      `;
+      const ackBtn = document.createElement("button");
+      ackBtn.textContent = "Acknowledge";
+      ackBtn.addEventListener("click", async () => {
+        ackBtn.disabled = true;
+        try {
+          await api.acknowledgeReport(report.id);
+        } catch (e) {
+          alert_error(e);
+          ackBtn.disabled = false;
+        }
+      });
+      card.querySelector(".actions").appendChild(ackBtn);
+      el.appendChild(card);
+    }
+  }
+
+  function applySosUpdate(sectorId, alerts) {
+    for (const alert of alerts) {
+      if (alert.status === "active" || alert.status === "acknowledged") {
+        openSos.set(alert.id, { alert, sectorId });
+      } else {
+        openSos.delete(alert.id);
+      }
+    }
+    map.applySos(sectorId, alerts);
+    renderSosList();
+  }
+
+  function applyReportUpdate(sectorId, reports) {
+    for (const report of reports) {
+      if (report.status === "acknowledged") {
+        pendingReports.delete(report.id);
+      } else {
+        pendingReports.set(report.id, { report, sectorId });
+      }
+    }
+    map.applyReports(sectorId, reports);
+    renderReportList();
+  }
+
+  async function loadSector(sector) {
+    sectors.set(sector.id, sector);
+    map.addSector(sector);
+    renderSectorList();
+
+    const [hexes, presence, sos, reports] = await Promise.all([
+      api.getHexes(sector.id).catch(() => ({ hexes: [] })),
+      api.getPresence(sector.id).catch(() => []),
+      api.getSos(sector.id).catch(() => []),
+      api.getReports(sector.id).catch(() => []),
+    ]);
+    map.applyHexes(sector.id, hexes.hexes || hexes);
+    map.applyPresence(sector.id, presence);
+    applySosUpdate(sector.id, sos);
+    applyReportUpdate(sector.id, reports);
+  }
+
+  // ---- initial load ----
+  let event;
+  try {
+    event = await api.getEvent(eventId);
+  } catch (e) {
+    root.querySelector("#event-name").textContent = "Failed to load event";
+    return;
+  }
+  root.querySelector("#event-name").textContent = event.name;
+
+  let sectorList = [];
+  try {
+    sectorList = await api.listSectors(eventId);
+  } catch (e) {
+    // fall through with no sectors; the sidebar will show the empty state
+  }
+  await Promise.all(sectorList.map(loadSector));
+
+  // ---- new sector drawing ----
+  const newSectorBtn = root.querySelector("#new-sector-btn");
+  const drawControls = root.querySelector("#draw-controls");
+  newSectorBtn.addEventListener("click", () => startSectorDraw());
+
+  function startSectorDraw() {
+    drawControls.innerHTML = `
+      <input id="sector-name" placeholder="Sector name" />
+      <div class="draw-hint" id="draw-hint">Click the map to place boundary points (3+), then Finish.</div>
+      <div class="row">
+        <button id="finish-draw" disabled>Finish (0 pts)</button>
+        <button class="secondary" id="cancel-draw">Cancel</button>
+      </div>
+    `;
+    const finishBtn = drawControls.querySelector("#finish-draw");
+    map.startDrawing((count) => {
+      finishBtn.disabled = count < 3;
+      finishBtn.textContent = `Finish (${count} pts)`;
+    });
+    drawControls.querySelector("#cancel-draw").addEventListener("click", resetDrawControls);
+    finishBtn.addEventListener("click", async () => {
+      const name = drawControls.querySelector("#sector-name").value.trim();
+      if (!name) {
+        alert("give the sector a name first");
+        return;
+      }
+      const boundary = map.finishDrawing();
+      if (!boundary) {
+        alert("place at least 3 points");
+        return;
+      }
+      finishBtn.disabled = true;
+      try {
+        const sector = await api.createSector(eventId, name, boundary);
+        await loadSector(sector);
+        resetDrawControls();
+      } catch (e) {
+        alert(e.message || "failed to create sector");
+        resetDrawControls();
+      }
+    });
+  }
+
+  function resetDrawControls() {
+    map.cancelDrawing();
+    drawControls.innerHTML = '<button class="secondary" id="new-sector-btn">+ New sector</button>';
+    drawControls.querySelector("#new-sector-btn").addEventListener("click", startSectorDraw);
+  }
+
+  // ---- realtime ----
+  const dot = root.querySelector("#conn-dot");
+  const label = root.querySelector("#conn-label");
+  const socket = new DashboardSocket(eventId, {
+    onStatusChange: (status) => {
+      dot.className = `dot ${status}`;
+      label.textContent = status;
+    },
+    onMessage: (msg) => {
+      switch (msg.type) {
+        case "hex_delta":
+          map.applyHexes(msg.sector_id, msg.hexes);
+          break;
+        case "presence_delta":
+          map.applyPresence(msg.sector_id, msg.devices);
+          break;
+        case "sos_delta":
+          applySosUpdate(msg.sector_id, msg.alerts);
+          break;
+        case "report_delta":
+          applyReportUpdate(msg.sector_id, msg.reports);
+          break;
+      }
+    },
+  });
+  socket.start();
+
+  // Torn down when the hash router re-renders into a different view.
+  window.addEventListener(
+    "hashchange",
+    () => socket.stop(),
+    { once: true }
+  );
+}
+
+function renderLegend(el) {
+  const presenceItems = Object.entries(PRESENCE_COLORS)
+    .map(
+      ([state, color]) =>
+        `<div class="legend-item"><span class="legend-swatch" style="background:${color}"></span>${state.replace("_", " ")}</div>`
+    )
+    .join("");
+  const reportItems = Object.entries(REPORT_KIND_STYLE)
+    .map(
+      ([kind, style]) =>
+        `<div class="legend-item"><span class="legend-swatch" style="background:${style.color}"></span>${kind}</div>`
+    )
+    .join("");
+  el.innerHTML = `<div class="legend-item" style="margin-bottom:8px"><strong>Presence</strong></div>${presenceItems}
+    <div class="legend-item" style="margin:10px 0 8px"><strong>Reports</strong></div>${reportItems}`;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function alert_error(e) {
+  alert(e.message || "action failed");
+}

@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .api.routes import (
@@ -136,3 +138,15 @@ app.include_router(presence.router)
 app.include_router(sos.router)
 app.include_router(reports.router)
 app.include_router(ws.router)
+
+# Phase 6c: the Commander Dashboard is a plain HTML/JS/Leaflet SPA (no build
+# step) served straight off this API, same-origin -- consistent with the
+# CORS comment above that the dashboard is the only browser client this
+# backend ever expects. It talks to the REST/WS routes above like any other
+# client, nothing dashboard-specific exists server-side beyond serving these
+# static files.
+app.mount(
+    "/dashboard",
+    StaticFiles(directory=Path(__file__).resolve().parent.parent / "dashboard", html=True),
+    name="dashboard",
+)
