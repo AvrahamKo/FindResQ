@@ -1,6 +1,7 @@
 import { api } from "./api.js";
 import { DashboardSocket } from "./ws.js";
 import { TacticalMap, PRESENCE_COLORS, REPORT_KIND_STYLE } from "./map.js";
+import { showSubjectModal } from "./subject-view.js";
 
 // The right-hand panel has two modes: an event-wide overview (nothing
 // selected) and a focused single-sector management panel. Both render their
@@ -16,6 +17,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       <div class="title" id="event-name">Loading…</div>
       <span class="event-status-label" id="event-status-label"></span>
       <button id="start-event-btn" style="display:none">Start Event</button>
+      <button class="secondary" id="subject-btn">Subject</button>
       <span class="dot" id="conn-dot"></span>
       <span id="conn-label" style="font-size:12px;color:var(--text-dim)">connecting…</span>
       <div class="spacer"></div>
@@ -596,10 +598,30 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     return;
   }
   root.querySelector("#event-name").textContent = event.name;
-  // Only used to decide whether "Make Lead" is actionable (commander-only).
+  // Decides whether commander-only actions ("Make Lead", editing the subject
+  // record) are actionable. The backend enforces them regardless; this only
+  // avoids offering an action that can only 403.
   me = await api.me().catch(() => null);
   renderEventStatus();
   renderRightPanel();
+  wireSubjectButton();
+
+  function wireSubjectButton() {
+    const btn = root.querySelector("#subject-btn");
+    btn.addEventListener("click", () =>
+      showSubjectModal(eventId, { canEdit: isCommander() }),
+    );
+    // Nudge the commander when the callout has no subject on file yet --
+    // it is the one piece of context every searcher ultimately depends on,
+    // and an event can legitimately be created before it's known.
+    if (!isCommander()) return;
+    api
+      .getSubject(eventId)
+      .then((subject) => {
+        if (subject === null) btn.classList.add("needs-attention");
+      })
+      .catch(() => {});
+  }
 
   function renderEventStatus() {
     const label = root.querySelector("#event-status-label");

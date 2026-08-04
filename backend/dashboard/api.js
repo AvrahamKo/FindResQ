@@ -57,6 +57,28 @@ export const api = {
   getEvent: (eventId) => request("GET", `/events/${eventId}`),
   startEvent: (eventId) => request("POST", `/events/${eventId}/start`),
 
+  // --- Subject (missing person) ------------------------------------------
+  // Commander-only, both directions. "No subject recorded yet" is a 404, not
+  // an empty body, so it is normalised to null here -- it is an ordinary
+  // state (an event can be spun up before the subject details are known),
+  // not an error the UI should surface as one.
+  getSubject: async (eventId) => {
+    try {
+      return await request("GET", `/events/${eventId}/subject`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  },
+  // PUT is a true UPSERT that overwrites EVERY column (see
+  // subjects_repo.upsert's ON CONFLICT ... DO UPDATE). Any field omitted
+  // here is written as NULL, so callers must send the full record, not a
+  // patch -- the form is always prefilled from the current values for
+  // exactly this reason. `retention_days` also RESETS the purge deadline on
+  // every save.
+  upsertSubject: (eventId, subject) =>
+    request("PUT", `/events/${eventId}/subject`, { body: subject }),
+
   listSectors: (eventId) => request("GET", `/events/${eventId}/sectors`),
   createSector: (eventId, name, boundary) =>
     request("POST", `/events/${eventId}/sectors`, { body: { name, boundary } }),

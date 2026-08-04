@@ -4,14 +4,24 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>LifeSearch — Commander Dashboard</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!--
+    Leaflet and h3-js are VENDORED into vendor/, not loaded from a CDN.
+    A command post on a degraded uplink previously got a dashboard that
+    rendered nothing at all -- the map libraries themselves were a remote
+    dependency. Everything here except the OSM basemap tiles now loads
+    same-origin, so the sector polygons, coverage hexes, presence markers
+    and every control still work with no internet at all.
+    Pinned: Leaflet 1.9.4, h3-js 4.1.0. To upgrade, replace the files in
+    vendor/ -- there is no package manager or build step in this project.
+  -->
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div id="app"></div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/h3-js/h3-js.umd.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
