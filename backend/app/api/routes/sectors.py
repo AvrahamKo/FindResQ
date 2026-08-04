@@ -22,6 +22,7 @@ from ..schemas.sectors import (
     SectorCreate,
     SectorLeadAssign,
     SectorOut,
+    SectorStatusUpdate,
     SectorTuningUpdate,
 )
 from ...errors import Conflict, Forbidden, NotFound
@@ -97,6 +98,28 @@ async def _require_sector_visibility(
 async def get_sector(sector_id: uuid.UUID, user: CurrentUser, conn: ConnDep) -> SectorOut:
     swe = await _require_sector_visibility(conn, sector_id, user)
     return await _to_out(conn, swe.sector)
+
+
+@router.patch("/sectors/{sector_id}", response_model=SectorOut)
+async def update_sector_status(
+    sector_id: uuid.UUID, payload: SectorStatusUpdate, user: CurrentUser, conn: ConnDep
+) -> SectorOut:
+    """Recruitment on/off switch -- a sector defaults to 'open' at creation
+    (see sectors_repo.create) with no way to request otherwise, so this is
+    the only way to pause/resume volunteers joining without touching the
+    event itself. Note this is independent of the event's own 'draft' ->
+    'active' status: a sector being 'open' does NOT let anyone join unless
+    its parent event is also 'active' (see routes/memberships.py's
+    join_sector), and this endpoint has no effect on that."""
+    await require_lead_or_commander(conn, sector_id, user)
+    sector = await sectors_repo.set_status(conn, sector_id, payload.status)
+    if sector is None:
+        raise NotFound("sector not found")
+
+    logger.info(
+        "sector status updated id=%s status=%s by=%s", sector_id, payload.status, user.id
+    )
+    return await _to_out(conn, sector)
 
 
 @router.patch("/sectors/{sector_id}/tuning", response_model=SectorOut)

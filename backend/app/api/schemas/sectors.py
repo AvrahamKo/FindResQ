@@ -28,6 +28,13 @@ class SectorCreate(BaseModel):
     boundary: GeoJSONPolygon
 
 
+class SectorStatusUpdate(BaseModel):
+    # 'closed' deliberately excluded -- that's a terminal state set by event
+    # teardown (`close_all_for_event`), not something to toggle back and
+    # forth from this recruitment on/off switch.
+    status: Literal["open", "paused"]
+
+
 class SectorTuningUpdate(BaseModel):
     """All fields optional -- only supplied keys are written (partial update).
     Available to a sector's Lead as well as the Commander, per the PRD's

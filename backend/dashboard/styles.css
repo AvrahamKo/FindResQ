@@ -97,6 +97,15 @@ a { color: var(--accent); }
 .top-bar .dot.connecting { background: var(--warn); }
 .top-bar .dot.disconnected { background: var(--danger); }
 
+.event-status-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 3px 8px; border-radius: 3px; font-weight: 700;
+}
+.event-status-label.status-draft { background: rgba(241, 196, 15, 0.15); color: var(--warn); }
+.event-status-label.status-active { background: rgba(46, 204, 113, 0.15); color: var(--ok); }
+.event-status-label.status-ended { background: rgba(139, 148, 158, 0.15); color: var(--text-dim); }
+#start-event-btn { padding: 5px 12px; font-size: 12px; }
+
 .events-page { max-width: 640px; margin: 32px auto; padding: 0 16px; }
 .event-row {
   display: flex; justify-content: space-between; align-items: center;
@@ -136,6 +145,19 @@ a { color: var(--accent); }
 .sector-row-top { display: flex; align-items: center; gap: 8px; }
 .sector-name { flex: 1; }
 .sector-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+.sector-status-line {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin: 4px 0 0 18px;
+}
+.sector-status-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 6px; border-radius: 3px; font-weight: 700;
+}
+.sector-status-label.status-open { background: rgba(46, 204, 113, 0.15); color: var(--ok); }
+.sector-status-label.status-paused { background: rgba(241, 196, 15, 0.15); color: var(--warn); }
+.sector-status-label.status-closed { background: rgba(139, 148, 158, 0.15); color: var(--text-dim); }
+.sector-status-line .status-toggle-btn { padding: 2px 8px; font-size: 11px; }
 
 .sector-join-code {
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px;

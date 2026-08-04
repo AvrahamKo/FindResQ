@@ -55,10 +55,16 @@ export const api = {
   listEvents: () => request("GET", "/events"),
   createEvent: (name) => request("POST", "/events", { body: { name } }),
   getEvent: (eventId) => request("GET", `/events/${eventId}`),
+  startEvent: (eventId) => request("POST", `/events/${eventId}/start`),
 
   listSectors: (eventId) => request("GET", `/events/${eventId}/sectors`),
   createSector: (eventId, name, boundary) =>
     request("POST", `/events/${eventId}/sectors`, { body: { name, boundary } }),
+  // 'closed' is excluded server-side -- that's set by event teardown, not
+  // this toggle. Independent of the event's own draft/active status: an
+  // 'open' sector still rejects joins if its event was never started.
+  updateSectorStatus: (sectorId, status) =>
+    request("PATCH", `/sectors/${sectorId}`, { body: { status } }),
 
   // No GET /sectors/{id}/join-codes exists server-side -- codes are
   // ephemeral by design (default 12h TTL, see JoinCodeCreate), so the

@@ -7,6 +7,8 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     <div class="top-bar">
       <button class="secondary" id="back">&larr; Events</button>
       <div class="title" id="event-name">Loading…</div>
+      <span class="event-status-label" id="event-status-label"></span>
+      <button id="start-event-btn" style="display:none">Start Event</button>
       <span class="dot" id="conn-dot"></span>
       <span id="conn-label" style="font-size:12px;color:var(--text-dim)">connecting…</span>
       <div class="spacer"></div>
@@ -67,6 +69,11 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       top.innerHTML = `<span class="sector-swatch" style="background:${color}"></span><span class="sector-name">${sector.name}</span>`;
       row.appendChild(top);
 
+      const statusLine = document.createElement("div");
+      statusLine.className = "sector-status-line";
+      row.appendChild(statusLine);
+      renderStatusToggle(statusLine, sector);
+
       const codeLine = document.createElement("div");
       codeLine.className = "sector-join-code";
       row.appendChild(codeLine);
@@ -74,6 +81,41 @@ export async function renderDashboard(root, { eventId, onLogout }) {
 
       el.appendChild(row);
     }
+  }
+
+  function renderStatusToggle(el, sector) {
+    el.innerHTML = "";
+
+    if (sector.status === "closed") {
+      const label = document.createElement("span");
+      label.className = "sector-status-label status-closed";
+      label.textContent = "Closed";
+      el.appendChild(label);
+      return;
+    }
+
+    const isOpen = sector.status === "open";
+    const label = document.createElement("span");
+    label.className = `sector-status-label ${isOpen ? "status-open" : "status-paused"}`;
+    label.textContent = isOpen ? "Accepting Volunteers" : "Recruitment Paused";
+    el.appendChild(label);
+
+    const btn = document.createElement("button");
+    btn.className = "secondary status-toggle-btn";
+    btn.textContent = isOpen ? "Pause Recruitment" : "Resume Recruitment";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const nextStatus = isOpen ? "paused" : "open";
+      try {
+        const updated = await api.updateSectorStatus(sector.id, nextStatus);
+        sector.status = updated.status;
+        renderStatusToggle(el, sector);
+      } catch (e) {
+        alert(e.message || "failed to update sector status");
+        btn.disabled = false;
+      }
+    });
+    el.appendChild(btn);
   }
 
   function renderJoinCodeLine(el, sector) {
@@ -263,6 +305,31 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     return;
   }
   root.querySelector("#event-name").textContent = event.name;
+  renderEventStatus();
+
+  function renderEventStatus() {
+    const label = root.querySelector("#event-status-label");
+    const startBtn = root.querySelector("#start-event-btn");
+    label.textContent = event.status;
+    label.className = `event-status-label status-${event.status}`;
+
+    if (event.status === "draft") {
+      startBtn.style.display = "";
+      startBtn.disabled = false;
+      startBtn.onclick = async () => {
+        startBtn.disabled = true;
+        try {
+          event = await api.startEvent(eventId);
+          renderEventStatus();
+        } catch (e) {
+          alert(e.message || "failed to start event");
+          startBtn.disabled = false;
+        }
+      };
+    } else {
+      startBtn.style.display = "none";
+    }
+  }
 
   let sectorList = [];
   try {
