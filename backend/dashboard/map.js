@@ -40,6 +40,7 @@ class SectorLayers {
   constructor(color) {
     this.color = color;
     this.boundaryLayer = null;
+    this.onClick = null;
     this.hexLayers = new Map(); // hex_id -> polygon
     this.presenceMarkers = new Map(); // device_id -> marker
     this.sosMarkers = new Map(); // alert_id -> marker
@@ -69,9 +70,13 @@ export class TacticalMap {
     this._selectedSectorId = null;
 
     this._drawing = false;
+    this._editing = false;
+    this._editingSectorId = null;
     this._drawPoints = [];
     this._drawPreview = null;
     this._drawClickHandler = null;
+    this._vertexHandles = [];
+    this._onGeometryChange = null;
   }
 
   sectorColor(sectorId) {
@@ -95,8 +100,10 @@ export class TacticalMap {
     // row in the sidebar -- but only when not mid-draw, since drawing needs
     // raw map clicks and a stray polygon hit would otherwise hijack them.
     if (onClick) {
+      // Retained so replaceSectorBoundary can rebind it after a boundary edit.
+      layers.onClick = onClick;
       layers.boundaryLayer.on("click", (e) => {
-        if (this._drawing) return;
+        if (this._drawing || this._editing) return;
         L.DomEvent.stop(e);
         onClick(sector.id);
       });
@@ -267,18 +274,41 @@ export class TacticalMap {
   }
 
   // ---- Sector boundary drawing (for "New Sector") ----
+  //
+  // Drawing and editing share `_drawPoints`, `_renderDrawPreview` and the
+  // same {added, removed, moved} -> onChange callback, so the area readout
+  // and self-intersection warning are computed in one place for both modes.
 
-  startDrawing(onPointsChange) {
+  startDrawing(onChange) {
     this.cancelDrawing();
     this._drawing = true;
     this._drawPoints = [];
+    this._onGeometryChange = onChange;
     this.map.getContainer().style.cursor = "crosshair";
     this._drawClickHandler = (e) => {
       this._drawPoints.push(e.latlng);
       this._renderDrawPreview();
-      onPointsChange(this._drawPoints.length);
+      this._emitGeometryChange();
     };
     this.map.on("click", this._drawClickHandler);
+    this._emitGeometryChange();
+  }
+
+  /// Removes the most recently placed point. No-op when empty, so a commander
+  /// can hold the button down without it throwing.
+  undoLastPoint() {
+    if (this._drawPoints.length === 0) return;
+    this._drawPoints.pop();
+    this._renderDrawPreview();
+    this._emitGeometryChange();
+  }
+
+  _emitGeometryChange() {
+    if (!this._onGeometryChange) return;
+    this._onGeometryChange({
+      points: this._drawPoints.map((ll) => ({ lat: ll.lat, lng: ll.lng })),
+      count: this._drawPoints.length,
+    });
   }
 
   _renderDrawPreview() {
@@ -286,16 +316,142 @@ export class TacticalMap {
       this.map.removeLayer(this._drawPreview);
       this._drawPreview = null;
     }
+    for (const handle of this._vertexHandles) this.map.removeLayer(handle);
+    this._vertexHandles = [];
+
     if (this._drawPoints.length === 0) return;
+
     this._drawPreview = L.polygon(this._drawPoints, {
       color: "#3fa9f5",
       dashArray: "4 4",
       fillOpacity: 0.1,
     }).addTo(this.map);
+
+    // Vertex handles exist in BOTH modes: while drawing they show what has
+    // been placed so far, and while editing they are the drag targets.
+    this._drawPoints.forEach((latlng, index) => {
+      const handle = L.circleMarker(latlng, {
+        radius: 6,
+        color: "#ffffff",
+        weight: 2,
+        fillColor: "#3fa9f5",
+        fillOpacity: 1,
+        // Only draggable in edit mode -- during drawing, map clicks are
+        // placing points and a draggable handle would swallow them.
+        interactive: this._editing,
+        bubblingMouseEvents: false,
+      }).addTo(this.map);
+
+      if (!this._editing) return;
+
+      handle.on("mousedown", (e) => this._beginVertexDrag(index, e));
+      // Right-click removes, but never below the 3 vertices a polygon needs.
+      handle.on("contextmenu", (e) => {
+        L.DomEvent.stop(e);
+        if (this._drawPoints.length <= 3) return;
+        this._drawPoints.splice(index, 1);
+        this._renderDrawPreview();
+        this._emitGeometryChange();
+      });
+      this._vertexHandles.push(handle);
+    });
+
+    if (this._editing) this._renderMidpointHandles();
+  }
+
+  /// Faint handles at each edge midpoint; dragging one inserts a new vertex
+  /// there. This is the standard way to ADD detail to an existing outline --
+  /// without it, a commander could only move or delete what was already drawn.
+  _renderMidpointHandles() {
+    const points = this._drawPoints;
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i];
+      const b = points[(i + 1) % points.length];
+      const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
+      const handle = L.circleMarker(mid, {
+        radius: 4,
+        color: "#ffffff",
+        weight: 1,
+        fillColor: "#8b95a1",
+        fillOpacity: 0.85,
+        interactive: true,
+        bubblingMouseEvents: false,
+      }).addTo(this.map);
+      const insertAt = i + 1;
+      handle.on("mousedown", (e) => {
+        this._drawPoints.splice(insertAt, 0, mid);
+        this._renderDrawPreview();
+        this._beginVertexDrag(insertAt, e);
+      });
+      this._vertexHandles.push(handle);
+    }
+  }
+
+  /// Hand-rolled drag rather than L.Marker's `draggable`: circleMarker has no
+  /// drag support, and using real markers would mean managing icon anchors
+  /// for what is a 6px dot.
+  _beginVertexDrag(index, event) {
+    L.DomEvent.stop(event);
+    this.map.dragging.disable();
+
+    const onMove = (moveEvent) => {
+      this._drawPoints[index] = moveEvent.latlng;
+      if (this._drawPreview) this._drawPreview.setLatLngs(this._drawPoints);
+      this._emitGeometryChange();
+    };
+    const onUp = () => {
+      this.map.off("mousemove", onMove);
+      this.map.off("mouseup", onUp);
+      this.map.dragging.enable();
+      // Re-render once at the end so midpoint handles land on the new edges.
+      this._renderDrawPreview();
+      this._emitGeometryChange();
+    };
+    this.map.on("mousemove", onMove);
+    this.map.on("mouseup", onUp);
+  }
+
+  // ---- Editing an existing sector's boundary ----
+
+  /// Starts vertex editing from the sector's current outline. The sector's
+  /// own boundary layer is hidden meanwhile so the editable preview is not
+  /// drawn on top of a stale copy of itself.
+  startEditingSector(sectorId, ring, onChange) {
+    this.cancelDrawing();
+    this._editing = true;
+    this._editingSectorId = sectorId;
+    this._onGeometryChange = onChange;
+    this._drawPoints = ring.map((p) => L.latLng(p.lat, p.lng));
+
+    const layers = this.sectors.get(sectorId);
+    if (layers) this.map.removeLayer(layers.boundaryLayer);
+
+    this._renderDrawPreview();
+    this._emitGeometryChange();
+  }
+
+  /// Returns the edited ring as a GeoJSON Polygon, or null if it is not a
+  /// usable polygon. Does NOT clear edit mode -- the caller keeps editing if
+  /// the save fails.
+  getEditedBoundary() {
+    if (this._drawPoints.length < 3) return null;
+    const ring = this._drawPoints.map((ll) => [ll.lng, ll.lat]);
+    ring.push(ring[0]);
+    return { type: "Polygon", coordinates: [ring] };
   }
 
   cancelDrawing() {
+    // Restore the boundary layer hidden by startEditingSector.
+    if (this._editingSectorId) {
+      const layers = this.sectors.get(this._editingSectorId);
+      if (layers && !this.map.hasLayer(layers.boundaryLayer)) {
+        layers.boundaryLayer.addTo(this.map);
+      }
+    }
     this._drawing = false;
+    this._editing = false;
+    this._editingSectorId = null;
+    this._onGeometryChange = null;
     if (this._drawClickHandler) {
       this.map.off("click", this._drawClickHandler);
       this._drawClickHandler = null;
@@ -304,8 +460,31 @@ export class TacticalMap {
       this.map.removeLayer(this._drawPreview);
       this._drawPreview = null;
     }
+    for (const handle of this._vertexHandles) this.map.removeLayer(handle);
+    this._vertexHandles = [];
     this._drawPoints = [];
     this.map.getContainer().style.cursor = "";
+  }
+
+  /// Replaces a sector's rendered outline after a successful boundary save,
+  /// without tearing down its hex/presence/marker layers.
+  replaceSectorBoundary(sectorId, geojsonBoundary, name) {
+    const layers = this.sectors.get(sectorId);
+    if (!layers) return;
+    this.map.removeLayer(layers.boundaryLayer);
+    layers.boundaryLayer = L.geoJSON(geojsonBoundary, {
+      style: { color: layers.color, weight: 2, fillOpacity: 0.03 },
+    })
+      .bindTooltip(name)
+      .addTo(this.map);
+    if (layers.onClick) {
+      layers.boundaryLayer.on("click", (e) => {
+        if (this._drawing || this._editing) return;
+        L.DomEvent.stop(e);
+        layers.onClick(sectorId);
+      });
+    }
+    this._applySelectionStyling();
   }
 
   // Returns a GeoJSON Polygon body, or null if fewer than 3 points were placed.

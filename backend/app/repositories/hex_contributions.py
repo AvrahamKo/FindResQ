@@ -58,6 +58,28 @@ async def recalc(conn: asyncpg.Connection, sector_id: uuid.UUID, hex_ids: set[in
     )
 
 
+async def list_hex_ids_for_sector(
+    conn: asyncpg.Connection, sector_id: uuid.UUID
+) -> set[int]:
+    """Every hex this sector has any contribution for -- the recalc set when
+    something sector-wide changes the POD math (currently only
+    `repeat_discount`; see routes/sectors.py's update_tuning)."""
+    rows = await conn.fetch(
+        "SELECT DISTINCT hex_id FROM hex_contributions WHERE sector_id = $1",
+        sector_id,
+    )
+    return {row["hex_id"] for row in rows}
+
+
+async def count_for_sector(conn: asyncpg.Connection, sector_id: uuid.UUID) -> int:
+    """Used to gate `h3_resolution` changes: once contributions exist they are
+    all recorded at the OLD resolution, and no recalculation can convert them
+    -- the cell ids themselves would be wrong."""
+    return await conn.fetchval(
+        "SELECT count(*) FROM hex_contributions WHERE sector_id = $1", sector_id
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class HexCoverage:
     hex_id: int

@@ -2,6 +2,12 @@ import { api } from "./api.js";
 import { DashboardSocket } from "./ws.js";
 import { TacticalMap, PRESENCE_COLORS, REPORT_KIND_STYLE } from "./map.js";
 import { showSubjectModal } from "./subject-view.js";
+import {
+  formatArea,
+  geoJsonPolygonToRing,
+  isSelfIntersecting,
+  ringAreaSquareMeters,
+} from "./geo.js";
 
 // The right-hand panel has two modes: an event-wide overview (nothing
 // selected) and a focused single-sector management panel. Both render their
@@ -18,6 +24,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       <span class="event-status-label" id="event-status-label"></span>
       <button id="start-event-btn" style="display:none">Start Event</button>
       <button class="secondary" id="subject-btn">Subject</button>
+      <button class="danger" id="end-event-btn" style="display:none">End Event</button>
       <span class="dot" id="conn-dot"></span>
       <span id="conn-label" style="font-size:12px;color:var(--text-dim)">connecting…</span>
       <div class="spacer"></div>
@@ -142,6 +149,8 @@ export async function renderDashboard(root, { eventId, onLogout }) {
             <span>${escapeHtml(sector.name)}</span>
           </div>
         </div>
+        <h2>Boundary</h2>
+        <div id="boundary-control"></div>
         <h2>Recruitment</h2>
         <div id="recruit-control"></div>
         <h2>Join code</h2>
@@ -156,6 +165,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
         <div id="report-list"></div>
       `;
       el.querySelector("#close-sector").addEventListener("click", clearSelection);
+      renderBoundaryControl();
       renderRecruitControl();
       renderJoinCodeControl();
       renderMembersRoster();
@@ -177,6 +187,25 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   }
 
   // ---------- sector panel: recruitment ----------
+
+  function renderBoundaryControl() {
+    const el = root.querySelector("#boundary-control");
+    if (!el) return;
+    const sector = sectors.get(selectedSectorId);
+    if (!sector) return;
+
+    const ring = geoJsonPolygonToRing(sector.boundary);
+    el.innerHTML = `<span class="geo-readout">${ring.length} points · ${formatArea(
+      ringAreaSquareMeters(ring)
+    )}</span>`;
+
+    const editBtn = document.createElement("button");
+    editBtn.className = "secondary";
+    editBtn.id = "edit-boundary-btn";
+    editBtn.textContent = "Edit boundary";
+    editBtn.addEventListener("click", () => startBoundaryEdit(sector));
+    el.appendChild(editBtn);
+  }
 
   function renderRecruitControl() {
     const el = root.querySelector("#recruit-control");
@@ -646,6 +675,48 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     } else {
       startBtn.style.display = "none";
     }
+
+    // Teardown is commander-only and irreversible, so it appears only while
+    // there is something to tear down.
+    const endBtn = root.querySelector("#end-event-btn");
+    const canEnd = isCommander() && event.status !== "ended";
+    endBtn.style.display = canEnd ? "" : "none";
+    endBtn.disabled = false;
+    endBtn.onclick = () => confirmAndEndEvent(endBtn);
+  }
+
+  async function confirmAndEndEvent(endBtn) {
+    const sectorCount = sectors.size;
+    const activeMembers = [...sectors.keys()].reduce(
+      (total, id) => total + activeFor(id).length,
+      0,
+    );
+    // Spells out the actual consequences with real counts rather than a
+    // generic "are you sure?" -- this closes every sector and kills every
+    // live session, and there is no reopen.
+    const confirmed = confirm(
+      `End "${event.name}"?\n\n` +
+        `• ${sectorCount} sector(s) will be closed to new joins\n` +
+        `• ${activeMembers} active member session(s) will stop working on their next request\n` +
+        `• Volunteers still in the field will lose the ability to send telemetry, reports and SOS\n\n` +
+        "This cannot be undone — there is no way to reopen an ended event.",
+    );
+    if (!confirmed) return;
+
+    endBtn.disabled = true;
+    try {
+      event = await api.endEvent(eventId);
+      // Sector statuses all became 'closed' server-side; refetch rather than
+      // guessing, so the sidebar dots and recruitment controls tell the truth.
+      const refreshed = await api.listSectors(eventId).catch(() => []);
+      for (const sector of refreshed) sectors.set(sector.id, sector);
+      renderEventStatus();
+      renderSectorList();
+      renderRightPanel();
+    } catch (e) {
+      showError(e);
+      endBtn.disabled = false;
+    }
   }
 
   let sectorList = [];
@@ -662,20 +733,52 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   const drawControls = root.querySelector("#draw-controls");
   root.querySelector("#new-sector-btn").addEventListener("click", () => startSectorDraw());
 
+  /// Shared live feedback for BOTH drawing and editing: vertex count, true
+  /// spherical area, and a self-intersection warning. Returns whether the
+  /// ring is currently valid, so callers can gate their save button on the
+  /// same judgement the commander is reading off the screen.
+  function updateGeometryReadout(container, points) {
+    const readout = container.querySelector("#geo-readout");
+    const warning = container.querySelector("#geo-warning");
+    const enoughPoints = points.length >= 3;
+    const crossed = enoughPoints && isSelfIntersecting(points);
+
+    if (readout) {
+      readout.textContent = enoughPoints
+        ? `${points.length} points · ${formatArea(ringAreaSquareMeters(points))}`
+        : `${points.length} point${points.length === 1 ? "" : "s"} · need at least 3`;
+    }
+    if (warning) {
+      warning.textContent = crossed
+        ? "Boundary crosses itself — coverage hexes would be computed for the wrong area."
+        : "";
+      warning.style.display = crossed ? "" : "none";
+    }
+    return enoughPoints && !crossed;
+  }
+
   function startSectorDraw() {
     drawControls.innerHTML = `
       <input id="sector-name" placeholder="Sector name" />
-      <div class="draw-hint" id="draw-hint">Click the map to place boundary points (3+), then Finish.</div>
+      <div class="draw-hint">Click the map to place boundary points (3+), then Finish.</div>
+      <div class="geo-readout" id="geo-readout"></div>
+      <div class="geo-warning" id="geo-warning" style="display:none"></div>
       <div class="row">
-        <button id="finish-draw" disabled>Finish (0 pts)</button>
+        <button id="finish-draw" disabled>Finish</button>
+        <button class="secondary" id="undo-point" disabled>Undo</button>
         <button class="secondary" id="cancel-draw">Cancel</button>
       </div>
     `;
     const finishBtn = drawControls.querySelector("#finish-draw");
-    map.startDrawing((count) => {
-      finishBtn.disabled = count < 3;
-      finishBtn.textContent = `Finish (${count} pts)`;
+    const undoBtn = drawControls.querySelector("#undo-point");
+
+    map.startDrawing(({ points }) => {
+      const valid = updateGeometryReadout(drawControls, points);
+      finishBtn.disabled = !valid;
+      undoBtn.disabled = points.length === 0;
     });
+
+    undoBtn.addEventListener("click", () => map.undoLastPoint());
     drawControls.querySelector("#cancel-draw").addEventListener("click", resetDrawControls);
     finishBtn.addEventListener("click", async () => {
       const name = drawControls.querySelector("#sector-name").value.trim();
@@ -698,6 +801,54 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       } catch (e) {
         showError(e);
         resetDrawControls();
+      }
+    });
+  }
+
+  /// Vertex editing for an existing sector. Reachable only from that sector's
+  /// own panel, so there is never ambiguity about which outline is being
+  /// edited.
+  function startBoundaryEdit(sector) {
+    drawControls.innerHTML = `
+      <div class="draw-hint">
+        Drag a vertex to move it. Drag a small grey handle to add one.
+        Right-click a vertex to delete it.
+      </div>
+      <div class="geo-readout" id="geo-readout"></div>
+      <div class="geo-warning" id="geo-warning" style="display:none"></div>
+      <div class="row">
+        <button id="save-boundary">Save boundary</button>
+        <button class="secondary" id="cancel-boundary">Cancel</button>
+      </div>
+      <div class="panel-hint">
+        Previously-searched coverage is kept — it records where searchers
+        actually walked, not what the outline says.
+      </div>
+    `;
+    const saveBtn = drawControls.querySelector("#save-boundary");
+
+    map.startEditingSector(sector.id, geoJsonPolygonToRing(sector.boundary), ({ points }) => {
+      saveBtn.disabled = !updateGeometryReadout(drawControls, points);
+    });
+
+    drawControls.querySelector("#cancel-boundary").addEventListener("click", resetDrawControls);
+    saveBtn.addEventListener("click", async () => {
+      const boundary = map.getEditedBoundary();
+      if (!boundary) {
+        alert("a boundary needs at least 3 points");
+        return;
+      }
+      saveBtn.disabled = true;
+      try {
+        const updated = await api.updateSectorBoundary(sector.id, boundary);
+        sectors.set(updated.id, updated);
+        map.cancelDrawing();
+        map.replaceSectorBoundary(updated.id, updated.boundary, updated.name);
+        resetDrawControls();
+        renderRightPanel();
+      } catch (e) {
+        showError(e);
+        saveBtn.disabled = false;
       }
     });
   }

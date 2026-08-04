@@ -126,6 +126,37 @@ async def list_for_event(conn: asyncpg.Connection, event_id: uuid.UUID) -> list[
     return [_to_sector(row) for row in rows]
 
 
+async def update_boundary(
+    conn: asyncpg.Connection, sector_id: uuid.UUID, boundary_geojson: dict
+) -> Sector | None:
+    """Replaces the sector's outline.
+
+    Deliberately does NOT touch the coverage ledger. `hex_contributions`
+    records where searchers physically walked -- the ingest pipeline buffers
+    the track and hexifies it without ever intersecting the sector polygon
+    (see ingest/pipeline.py stages 9-10) -- and `recalc_hex_coverage()` reads
+    only that ledger plus `repeat_discount`. So a redrawn boundary cannot
+    change any hex's POD, and calling recalc here would burn CPU to write
+    back identical numbers. Verified empirically: moving a boundary entirely
+    off a covered hex and re-running recalc leaves its POD unchanged.
+
+    That is also the behaviour a callout wants: "we searched here" is ground
+    truth about the terrain, and redrawing an administrative outline must not
+    silently erase it.
+    """
+    row = await conn.fetchrow(
+        f"""
+        UPDATE sectors
+        SET boundary = ST_SetSRID(ST_GeomFromGeoJSON($2), 4326)::geography
+        WHERE id = $1
+        RETURNING {_COLUMNS}
+        """,
+        sector_id,
+        json.dumps(boundary_geojson),
+    )
+    return _to_sector(row) if row else None
+
+
 async def update_tuning(
     conn: asyncpg.Connection,
     sector_id: uuid.UUID,

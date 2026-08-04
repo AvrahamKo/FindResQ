@@ -56,6 +56,9 @@ export const api = {
   createEvent: (name) => request("POST", "/events", { body: { name } }),
   getEvent: (eventId) => request("GET", `/events/${eventId}`),
   startEvent: (eventId) => request("POST", `/events/${eventId}/start`),
+  // Teardown: closes every sector and ends every live session in the event.
+  // Irreversible -- there is no corresponding "reopen".
+  endEvent: (eventId) => request("POST", `/events/${eventId}/end`),
 
   // --- Subject (missing person) ------------------------------------------
   // Commander-only, both directions. "No subject recorded yet" is a 404, not
@@ -87,6 +90,12 @@ export const api = {
   // 'open' sector still rejects joins if its event was never started.
   updateSectorStatus: (sectorId, status) =>
     request("PATCH", `/sectors/${sectorId}`, { body: { status } }),
+  // Redrawing the outline deliberately does NOT touch coverage: hexes record
+  // where searchers physically walked and are never clipped to the polygon,
+  // so previously-searched ground stays searched. See the backend's
+  // sectors_repo.update_boundary for the full reasoning.
+  updateSectorBoundary: (sectorId, boundary) =>
+    request("PATCH", `/sectors/${sectorId}`, { body: { boundary } }),
 
   // No GET /sectors/{id}/join-codes exists server-side -- codes are
   // ephemeral by design (default 12h TTL, see JoinCodeCreate), so the

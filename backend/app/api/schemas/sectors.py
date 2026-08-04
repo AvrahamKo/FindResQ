@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class GeoJSONPolygon(BaseModel):
@@ -28,11 +28,25 @@ class SectorCreate(BaseModel):
     boundary: GeoJSONPolygon
 
 
-class SectorStatusUpdate(BaseModel):
+class SectorUpdate(BaseModel):
+    """Partial update. Both fields optional, but at least one required --
+    an empty body would otherwise be a silent no-op that still returns 200."""
+
     # 'closed' deliberately excluded -- that's a terminal state set by event
     # teardown (`close_all_for_event`), not something to toggle back and
     # forth from this recruitment on/off switch.
-    status: Literal["open", "paused"]
+    status: Literal["open", "paused"] | None = None
+
+    # Redrawing the outline. Does NOT disturb the coverage ledger; see
+    # sectors_repo.update_boundary for why that is correct rather than an
+    # omission.
+    boundary: GeoJSONPolygon | None = None
+
+    @model_validator(mode="after")
+    def _require_at_least_one_field(self) -> SectorUpdate:
+        if self.status is None and self.boundary is None:
+            raise ValueError("supply at least one of 'status' or 'boundary'")
+        return self
 
 
 class SectorTuningUpdate(BaseModel):

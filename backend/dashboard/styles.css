@@ -352,3 +352,22 @@ button.needs-attention {
   box-shadow: 0 0 0 1px var(--warn) inset;
   color: var(--warn);
 }
+
+/* ---- Sector drawing / boundary editing ---- */
+.geo-readout {
+  font-size: 11px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.geo-warning {
+  font-size: 11px; font-weight: 600; color: var(--danger);
+  background: rgba(231, 76, 60, 0.1);
+  border-radius: 4px; padding: 5px 7px;
+}
+#boundary-control {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+}
+#boundary-control button { padding: 3px 10px; font-size: 11px; }
+#end-event-btn { padding: 5px 12px; font-size: 12px; }
+/* Vertex handles must stay grabbable, not inherit the crosshair used while
+   placing new points. */
+.leaflet-interactive.leaflet-marker-icon { cursor: grab; }

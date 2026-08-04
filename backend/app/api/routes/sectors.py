@@ -22,10 +22,11 @@ from ..schemas.sectors import (
     SectorCreate,
     SectorLeadAssign,
     SectorOut,
-    SectorStatusUpdate,
     SectorTuningUpdate,
+    SectorUpdate,
 )
 from ...errors import Conflict, Forbidden, NotFound
+from ...repositories import hex_contributions as hex_contrib_repo
 from ...repositories import memberships as memberships_repo
 from ...repositories import sector_keys as sector_keys_repo
 from ...repositories import sectors as sectors_repo
@@ -101,25 +102,51 @@ async def get_sector(sector_id: uuid.UUID, user: CurrentUser, conn: ConnDep) -> 
 
 
 @router.patch("/sectors/{sector_id}", response_model=SectorOut)
-async def update_sector_status(
-    sector_id: uuid.UUID, payload: SectorStatusUpdate, user: CurrentUser, conn: ConnDep
+async def update_sector(
+    sector_id: uuid.UUID, payload: SectorUpdate, user: CurrentUser, conn: ConnDep
 ) -> SectorOut:
-    """Recruitment on/off switch -- a sector defaults to 'open' at creation
-    (see sectors_repo.create) with no way to request otherwise, so this is
-    the only way to pause/resume volunteers joining without touching the
-    event itself. Note this is independent of the event's own 'draft' ->
-    'active' status: a sector being 'open' does NOT let anyone join unless
-    its parent event is also 'active' (see routes/memberships.py's
-    join_sector), and this endpoint has no effect on that."""
+    """Recruitment on/off switch and/or a redrawn boundary.
+
+    `status` is independent of the event's own 'draft' -> 'active' status: a
+    sector being 'open' does NOT let anyone join unless its parent event is
+    also 'active' (see routes/memberships.py's join_sector), and this
+    endpoint has no effect on that.
+
+    `boundary` replaces the outline WITHOUT recalculating coverage, which is
+    deliberate -- see sectors_repo.update_boundary for the full reasoning.
+    Short version: contributions record where searchers physically walked
+    and are never clipped to the polygon, so a redrawn outline cannot change
+    any hex's POD.
+    """
     await require_lead_or_commander(conn, sector_id, user)
-    sector = await sectors_repo.set_status(conn, sector_id, payload.status)
+
+    sector = None
+    async with conn.transaction():
+        if payload.boundary is not None:
+            sector = await sectors_repo.update_boundary(
+                conn, sector_id, payload.boundary.model_dump()
+            )
+            if sector is None:
+                raise NotFound("sector not found")
+        if payload.status is not None:
+            sector = await sectors_repo.set_status(conn, sector_id, payload.status)
+
     if sector is None:
         raise NotFound("sector not found")
 
     logger.info(
-        "sector status updated id=%s status=%s by=%s", sector_id, payload.status, user.id
+        "sector updated id=%s by=%s status=%s boundary_changed=%s",
+        sector_id, user.id, payload.status, payload.boundary is not None,
     )
     return await _to_out(conn, sector)
+
+
+# Changing this retroactively re-weights every existing contribution, because
+# `recalc_hex_coverage` reads `repeat_discount` live from the sectors row.
+# The other tuning fields do NOT: `base_pod_day`/`base_pod_night` are
+# snapshotted into `hex_contributions.base_pod` at ingest time, so they only
+# affect FUTURE traversals.
+_POD_AFFECTING_TUNING_FIELDS = frozenset({"repeat_discount"})
 
 
 @router.patch("/sectors/{sector_id}/tuning", response_model=SectorOut)
@@ -128,16 +155,50 @@ async def update_tuning(
 ) -> SectorOut:
     await require_lead_or_commander(conn, sector_id, user)
 
+    existing = await sectors_repo.get(conn, sector_id)
+    if existing is None:
+        raise NotFound("sector not found")
+
     # Keys come only from SectorTuningUpdate's own declared fields, so this is
     # safe to interpolate as SQL identifiers in the repository layer -- never
     # widen this to forward a caller-supplied key set instead.
     fields = payload.model_dump(exclude_unset=True)
-    sector = await sectors_repo.update_tuning(conn, sector_id, fields)
-    if sector is None:
-        raise NotFound("sector not found")
+
+    # h3_resolution is not retroactively fixable: every existing hex_id was
+    # computed at the OLD resolution, so the stored cell ids -- not just
+    # their POD -- would be wrong. Recalculation cannot repair that, so this
+    # is refused outright rather than silently corrupting the ledger.
+    new_resolution = fields.get("h3_resolution")
+    if new_resolution is not None and new_resolution != existing.h3_resolution:
+        contributions = await hex_contrib_repo.count_for_sector(conn, sector_id)
+        if contributions > 0:
+            raise Conflict(
+                f"cannot change h3_resolution: this sector already has "
+                f"{contributions} coverage contribution(s) recorded at resolution "
+                f"{existing.h3_resolution}. Create a new sector instead."
+            )
+
+    pod_changed = any(
+        key in _POD_AFFECTING_TUNING_FIELDS and fields[key] != getattr(existing, key)
+        for key in fields
+    )
+
+    async with conn.transaction():
+        sector = await sectors_repo.update_tuning(conn, sector_id, fields)
+        if sector is None:
+            raise NotFound("sector not found")
+        if pod_changed:
+            # Without this, every already-computed cumulative_pod stays stale
+            # until some future ingest happens to touch that hex again.
+            hex_ids = await hex_contrib_repo.list_hex_ids_for_sector(conn, sector_id)
+            await hex_contrib_repo.recalc(conn, sector_id, hex_ids)
+            logger.info(
+                "sector tuning recalculated id=%s hexes=%d", sector_id, len(hex_ids)
+            )
 
     logger.info(
-        "sector tuning updated id=%s by=%s fields=%s", sector_id, user.id, list(fields)
+        "sector tuning updated id=%s by=%s fields=%s pod_recalc=%s",
+        sector_id, user.id, list(fields), pod_changed,
     )
     return await _to_out(conn, sector)
 
