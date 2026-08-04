@@ -220,6 +220,18 @@ class ApiClient {
     return MembershipInfo.fromJson(_decodeObject(response));
   }
 
+  /// Reads a sector (including its boundary polygon) with the ACCOUNT token.
+  /// Visible to any member of the sector as well as staff -- see
+  /// `_require_sector_visibility` in backend/app/api/routes/sectors.py -- so
+  /// a plain volunteer can fetch the bounds of the sector they're searching.
+  Future<SectorInfo> getSector({
+    required String accountToken,
+    required String sectorId,
+  }) async {
+    final response = await _get('/sectors/$sectorId', bearerToken: accountToken);
+    return SectorInfo.fromJson(_decodeObject(response));
+  }
+
   Future<SessionIssueResult> claimSession({
     required String accountToken,
     required String membershipId,

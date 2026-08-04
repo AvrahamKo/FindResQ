@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/join/join_state.dart';
 import '../../core/providers.dart';
+import 'active_session_view.dart';
 import 'join_code_view.dart';
 import 'membership_status_view.dart';
 

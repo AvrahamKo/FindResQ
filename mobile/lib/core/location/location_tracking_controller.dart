@@ -39,6 +39,10 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
   SamplingTierName? _currentTier;
   int _sampleCount = 0;
 
+  /// Retained purely so a re-subscribe (tier change) doesn't blank the HUD's
+  /// last known position -- the packet pipeline itself never reads this.
+  LocationSample? _lastSample;
+
   LocationTrackingController({
     required LocationSource location,
     required BatteryInfoProvider battery,
@@ -132,6 +136,8 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
       tier: tier.name,
       sampleCount: _sampleCount,
       bufferedCount: await _buffer.count(),
+      lastSample: _lastSample,
+      batteryPct: battery.levelPct,
     );
   }
 
@@ -148,6 +154,7 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
       batteryPct: batteryPct,
     );
     _sampleCount++;
+    _lastSample = sample;
 
     // Re-check the tier after every sample rather than on a separate timer:
     // this keeps the controller driven entirely by the position stream
@@ -166,6 +173,8 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
       tier: freshTier.name,
       sampleCount: _sampleCount,
       bufferedCount: await _buffer.count(),
+      lastSample: sample,
+      batteryPct: freshBattery.levelPct,
     );
   }
 

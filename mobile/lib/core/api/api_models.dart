@@ -164,17 +164,43 @@ class MembershipInfo {
       );
 }
 
+/// One WGS84 position.
+///
+/// GeoJSON orders each coordinate pair as `[longitude, latitude]` -- the
+/// reverse of the `(lat, lng)` order every map widget and every other part
+/// of this app uses. That swap happens exactly ONCE, in
+/// [GeoPoint.fromGeoJson], rather than at each call site: a flipped pair is
+/// the classic silent geo bug (it doesn't throw, it just puts the sector in
+/// the wrong hemisphere).
+class GeoPoint {
+  final double latitude;
+  final double longitude;
+
+  const GeoPoint({required this.latitude, required this.longitude});
+
+  factory GeoPoint.fromGeoJson(List<dynamic> pair) => GeoPoint(
+    longitude: (pair[0] as num).toDouble(),
+    latitude: (pair[1] as num).toDouble(),
+  );
+}
+
 class SectorInfo {
   final String id;
   final String eventId;
   final String name;
   final String status;
 
+  /// The sector's exterior boundary ring. Empty when the payload carried no
+  /// boundary -- callers must handle that rather than assume a polygon (the
+  /// map degrades to "your position only" instead of failing).
+  final List<GeoPoint> boundary;
+
   const SectorInfo({
     required this.id,
     required this.eventId,
     required this.name,
     required this.status,
+    this.boundary = const [],
   });
 
   factory SectorInfo.fromJson(Map<String, dynamic> json) => SectorInfo(
@@ -182,7 +208,24 @@ class SectorInfo {
     eventId: json['event_id'] as String,
     name: json['name'] as String,
     status: json['status'] as String,
+    boundary: _parseBoundary(json['boundary']),
   );
+
+  /// Reads the exterior ring out of a GeoJSON Polygon. Interior rings
+  /// (holes) are deliberately ignored -- `SectorCreate` only ever accepts a
+  /// single-ring polygon, so a hole would mean the backend contract changed.
+  static List<GeoPoint> _parseBoundary(Object? raw) {
+    if (raw is! Map) return const [];
+    final coordinates = raw['coordinates'];
+    if (coordinates is! List || coordinates.isEmpty) return const [];
+    final exteriorRing = coordinates.first;
+    if (exteriorRing is! List) return const [];
+    return exteriorRing
+        .whereType<List>()
+        .where((pair) => pair.length >= 2)
+        .map(GeoPoint.fromGeoJson)
+        .toList(growable: false);
+  }
 }
 
 class SessionIssueResult {

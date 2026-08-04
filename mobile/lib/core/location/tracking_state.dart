@@ -1,3 +1,4 @@
+import 'location_sample.dart';
 import 'location_sampling_policy.dart';
 
 /// Sealed so the UI can exhaustively switch over every phase of location
@@ -19,10 +20,27 @@ class TrackingActive extends TrackingState {
   final int sampleCount;
   final int bufferedCount;
 
+  /// The most recent fix. Null between `start()` and the first sample
+  /// actually arriving from the platform -- "tracking is on but we have no
+  /// fix yet" is a real, displayable state, not an error.
+  ///
+  /// Exposed so the session HUD can show position/accuracy WITHOUT opening a
+  /// second platform location subscription just to draw a map marker: this
+  /// app treats battery as a first-class constraint (see
+  /// [LocationSamplingPolicy]), and a duplicate GPS stream would undercut
+  /// the whole tiering scheme.
+  final LocationSample? lastSample;
+
+  /// Battery level read when the tier was last resolved -- i.e. the same
+  /// reading that chose [tier], not an independent poll.
+  final int? batteryPct;
+
   const TrackingActive({
     required this.tier,
     required this.sampleCount,
     required this.bufferedCount,
+    this.lastSample,
+    this.batteryPct,
   });
 }
 

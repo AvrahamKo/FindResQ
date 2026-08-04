@@ -14,6 +14,7 @@ import 'package:sqflite/sqflite.dart' as sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'api/api_client.dart';
+import 'api/api_models.dart';
 import 'auth/auth_controller.dart';
 import 'auth/auth_state.dart';
 import 'crypto/device_identity.dart';
@@ -196,3 +197,50 @@ final reportsListControllerProvider =
         storage: ref.watch(secureStorageManagerProvider),
       );
     });
+
+// --- Active-session HUD (Phase 6d) ---------------------------------------
+
+/// The sector the device currently holds a session for, including its
+/// boundary polygon, for the tactical map.
+///
+/// Returns null rather than throwing when it can't be loaded: a searcher in
+/// a dead zone still needs the rest of the screen (SOS, reports, their own
+/// position) to work, so the map degrades to "your position only" instead of
+/// the whole screen erroring out. Uses the ACCOUNT token -- any sector
+/// member may read their own sector (`_require_sector_visibility`).
+final activeSectorProvider = FutureProvider<SectorInfo?>((ref) async {
+  final storage = ref.watch(secureStorageManagerProvider);
+  final session = await storage.loadSession();
+  final account = await storage.loadAccount();
+  if (session == null || account == null) return null;
+  try {
+    return await ref
+        .watch(apiClientProvider)
+        .getSector(accountToken: account.accessToken, sectorId: session.sectorId);
+  } on Exception {
+    return null;
+  }
+});
+
+/// One-shot battery read, for the status bar BEFORE tracking starts. Once
+/// tracking is active the HUD prefers `TrackingActive.batteryPct`, which
+/// updates with every sample and is the same reading that picked the
+/// sampling tier -- this provider exists only so the bar isn't blank while
+/// tracking is idle.
+final batteryStatusProvider = FutureProvider<BatteryStatus?>((ref) async {
+  try {
+    return await ref.watch(batteryInfoProvider).currentStatus();
+  } on Exception {
+    return null;
+  }
+});
+
+/// Whether the tactical map draws an online basemap under the sector.
+///
+/// Overridden to false in widget tests: `TileLayer` issues real HTTP for
+/// every tile and keeps image-load timers alive, which trips the test
+/// binding's pending-timer assertion (see HANDOVER gotcha #10). The sector
+/// polygon and position marker render without it, which is also exactly
+/// what a searcher sees in a dead zone -- so tests exercise the same code
+/// path as offline field use.
+final mapTilesEnabledProvider = Provider<bool>((ref) => true);

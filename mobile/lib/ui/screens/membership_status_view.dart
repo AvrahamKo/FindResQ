@@ -4,11 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
-import 'location_status_view.dart';
-import 'report_form_view.dart';
-import 'reports_list_view.dart';
-import 'sos_alerts_view.dart';
-import 'sos_button_view.dart';
 
 const _pollInterval = Duration(seconds: 4);
 
@@ -175,75 +170,6 @@ class _ClaimingSessionViewState extends ConsumerState<ClaimingSessionView> {
   }
 }
 
-class SessionActiveView extends StatelessWidget {
-  final String sectorName;
-  const SessionActiveView({super.key, required this.sectorName});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Active')),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.check_circle, color: Colors.green, size: 48),
-              const SizedBox(height: 16),
-              Text(
-                'You are active in $sectorName.',
-                style: const TextStyle(fontSize: 18),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              OutlinedButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const LocationStatusView(),
-                  ),
-                ),
-                child: const Text('Location tracking'),
-              ),
-              const SizedBox(height: 12),
-              FilledButton.tonal(
-                style: FilledButton.styleFrom(foregroundColor: Colors.red),
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const SosButtonView()),
-                ),
-                child: const Text('SOS'),
-              ),
-              const SizedBox(height: 12),
-              // Shown regardless of role -- the backend enforces the
-              // Lead/Commander check server-side (403 for a volunteer), so
-              // a plain searcher tapping this just sees that error rather
-              // than the button needing to duplicate the role check
-              // client-side from a session field this view doesn't
-              // currently thread through.
-              OutlinedButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const SosAlertsView()),
-                ),
-                child: const Text('Sector SOS alerts (Lead/Commander)'),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const ReportFormView()),
-                ),
-                child: const Text('File a report'),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const ReportsListView()),
-                ),
-                child: const Text('Sector reports'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
+// SessionActiveView moved to active_session_view.dart when it was redesigned
+// into the tactical HUD -- it outgrew this file, which is otherwise the
+// small pre-session status screens (pending/rejected/revoked/claiming).

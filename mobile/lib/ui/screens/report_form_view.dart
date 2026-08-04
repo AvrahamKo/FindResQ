@@ -18,14 +18,21 @@ const Map<String, String> _kindLabels = {
 /// there's no manual location entry, matching the app's location model
 /// throughout (a report's location is where you are when you file it).
 class ReportFormView extends ConsumerStatefulWidget {
-  const ReportFormView({super.key});
+  /// Preselects the kind when the form is opened from the quick-report grid.
+  /// Ignored if it isn't a known wire-format kind, so a bad value degrades
+  /// to the default rather than putting the dropdown in a state with no
+  /// matching item (which throws in [DropdownButtonFormField]).
+  final String? initialKind;
+
+  const ReportFormView({super.key, this.initialKind});
 
   @override
   ConsumerState<ReportFormView> createState() => _ReportFormViewState();
 }
 
 class _ReportFormViewState extends ConsumerState<ReportFormView> {
-  String _kind = reportKinds.first;
+  late String _kind =
+      reportKinds.contains(widget.initialKind) ? widget.initialKind! : reportKinds.first;
   final _noteController = TextEditingController();
 
   @override
