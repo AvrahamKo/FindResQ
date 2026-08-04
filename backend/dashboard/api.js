@@ -60,6 +60,14 @@ export const api = {
   createSector: (eventId, name, boundary) =>
     request("POST", `/events/${eventId}/sectors`, { body: { name, boundary } }),
 
+  // No GET /sectors/{id}/join-codes exists server-side -- codes are
+  // ephemeral by design (default 12h TTL, see JoinCodeCreate), so the
+  // dashboard can only ever know about a code it just created itself.
+  createJoinCode: (sectorId) =>
+    request("POST", `/sectors/${sectorId}/join-codes`, { body: {} }),
+  revokeJoinCode: (sectorId, code) =>
+    request("DELETE", `/sectors/${sectorId}/join-codes/${code}`),
+
   getHexes: (sectorId) => request("GET", `/sectors/${sectorId}/hexes`),
   getPresence: (sectorId) => request("GET", `/sectors/${sectorId}/presence`),
   getSos: (sectorId) => request("GET", `/sectors/${sectorId}/sos`),

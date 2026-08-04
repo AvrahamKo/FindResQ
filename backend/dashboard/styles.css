@@ -130,11 +130,31 @@ a { color: var(--accent); }
 .side-panel h2:first-child { margin-top: 0; }
 
 .sector-row {
-  display: flex; align-items: center; gap: 8px;
   padding: 6px 4px; border-radius: 4px; font-size: 13px;
 }
 .sector-row:hover { background: #1f2732; }
+.sector-row-top { display: flex; align-items: center; gap: 8px; }
+.sector-name { flex: 1; }
 .sector-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+.sector-join-code {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin: 6px 0 4px 18px;
+}
+.sector-join-code .gen-code-btn { padding: 3px 8px; font-size: 11px; }
+.sector-join-code button.secondary { padding: 2px 8px; font-size: 11px; }
+.join-code-badge {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  background: #0d1117;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  color: var(--ok);
+}
+.join-code-meta { font-size: 10px; color: var(--text-dim); }
 
 #map { width: 100%; height: 100%; background: #0a0e14; }
 

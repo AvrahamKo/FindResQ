@@ -43,6 +43,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   const sectors = new Map(); // sectorId -> SectorOut
   const openSos = new Map(); // alertId -> { alert, sectorId }
   const pendingReports = new Map(); // reportId -> { report, sectorId }
+  const joinCodes = new Map(); // sectorId -> JoinCodeOut (only ones created THIS session -- see api.js)
 
   function sectorName(sectorId) {
     const s = sectors.get(sectorId);
@@ -52,16 +53,80 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   function renderSectorList() {
     const el = root.querySelector("#sector-list");
     el.innerHTML = "";
-    for (const sector of sectors.values()) {
-      const row = document.createElement("div");
-      row.className = "sector-row";
-      const color = map.sectorColor(sector.id);
-      row.innerHTML = `<span class="sector-swatch" style="background:${color}"></span><span>${sector.name}</span>`;
-      el.appendChild(row);
-    }
     if (sectors.size === 0) {
       el.innerHTML = '<div class="empty-hint">No sectors yet.</div>';
+      return;
     }
+    for (const sector of sectors.values()) {
+      const color = map.sectorColor(sector.id);
+      const row = document.createElement("div");
+      row.className = "sector-row";
+
+      const top = document.createElement("div");
+      top.className = "sector-row-top";
+      top.innerHTML = `<span class="sector-swatch" style="background:${color}"></span><span class="sector-name">${sector.name}</span>`;
+      row.appendChild(top);
+
+      const codeLine = document.createElement("div");
+      codeLine.className = "sector-join-code";
+      row.appendChild(codeLine);
+      renderJoinCodeLine(codeLine, sector);
+
+      el.appendChild(row);
+    }
+  }
+
+  function renderJoinCodeLine(el, sector) {
+    const entry = joinCodes.get(sector.id);
+    const expired = entry && new Date(entry.expires_at) <= new Date();
+    if (!entry || expired) {
+      if (expired) joinCodes.delete(sector.id);
+      el.innerHTML = "";
+      const btn = document.createElement("button");
+      btn.className = "secondary gen-code-btn";
+      btn.textContent = "Generate join code";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const code = await api.createJoinCode(sector.id);
+          joinCodes.set(sector.id, code);
+          renderJoinCodeLine(el, sector);
+        } catch (e) {
+          alert(e.message || "failed to create join code");
+          btn.disabled = false;
+        }
+      });
+      el.appendChild(btn);
+      return;
+    }
+
+    el.innerHTML = "";
+    const badge = document.createElement("span");
+    badge.className = "join-code-badge";
+    badge.textContent = entry.code;
+    el.appendChild(badge);
+
+    const meta = document.createElement("span");
+    meta.className = "join-code-meta";
+    const usesLabel = entry.max_uses ? `${entry.uses}/${entry.max_uses} uses` : `${entry.uses} used`;
+    meta.textContent = `${usesLabel} · expires ${new Date(entry.expires_at).toLocaleTimeString()}`;
+    el.appendChild(meta);
+
+    const revokeBtn = document.createElement("button");
+    revokeBtn.className = "secondary";
+    revokeBtn.textContent = "Revoke";
+    revokeBtn.addEventListener("click", async () => {
+      revokeBtn.disabled = true;
+      try {
+        await api.revokeJoinCode(sector.id, entry.code);
+        joinCodes.delete(sector.id);
+        renderJoinCodeLine(el, sector);
+      } catch (e) {
+        alert(e.message || "failed to revoke join code");
+        revokeBtn.disabled = false;
+      }
+    });
+    el.appendChild(revokeBtn);
   }
 
   function renderSosList() {
