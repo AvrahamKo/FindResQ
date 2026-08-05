@@ -139,6 +139,21 @@ app.include_router(sos.router)
 app.include_router(reports.router)
 app.include_router(ws.router)
 
+# The simulator API mints device identities and self-approves sector sessions
+# with no proof of possession. That is a deliberate backdoor for driving the
+# real ingest pipeline without physical handsets, and it must never exist
+# outside local development -- so it is not merely disabled, it is never
+# registered at all. `dev_sim._require_local` re-checks per request, so
+# removing this guard alone still fails closed. See test_dev_sim_routes.py.
+if get_settings().is_local:
+    from .api.routes import dev_sim
+
+    app.include_router(dev_sim.router)
+    logger.warning(
+        "DEV SIMULATOR API ENABLED at /dev/sim (env=local). "
+        "This mints device credentials without authentication."
+    )
+
 # Phase 6c: the Commander Dashboard is a plain HTML/JS/Leaflet SPA (no build
 # step) served straight off this API, same-origin -- consistent with the
 # CORS comment above that the dashboard is the only browser client this
