@@ -9,6 +9,7 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime
 
+import h3
 from fastapi import APIRouter
 
 from ..deps import ConnDep, CurrentUser
@@ -19,6 +20,33 @@ from ...errors import ValidationFailed
 from ...repositories import hex_contributions as hex_contrib_repo
 
 router = APIRouter(tags=["coverage"])
+
+
+def _parse_hex_id(value: str) -> int:
+    """Accept canonical H3 strings and legacy decimal wire values.
+
+    Coverage responses now use the canonical hexadecimal representation
+    expected by h3-js. Keeping decimal parsing here avoids breaking callers
+    that saved an id returned by an older server version.
+    """
+    try:
+        if h3.is_valid_cell(value):
+            return h3.str_to_int(value)
+    except (ValueError, OverflowError):
+        # A legacy decimal bigint is not an H3 string and may overflow the
+        # string API before it can simply return False. Fall through to the
+        # compatibility parser below.
+        pass
+
+    try:
+        candidate = int(value)
+        canonical = h3.int_to_str(candidate)
+    except (ValueError, OverflowError) as exc:
+        raise ValidationFailed("hex_id must be a valid H3 cell id") from exc
+
+    if not h3.is_valid_cell(canonical):
+        raise ValidationFailed("hex_id must be a valid H3 cell id")
+    return candidate
 
 
 @router.get("/sectors/{sector_id}/hexes", response_model=CoverageResponse)
@@ -53,10 +81,7 @@ async def get_hex_contributors(
     aggregated POD, not the attribution behind it."""
     await require_lead_or_commander(conn, sector_id, user)
 
-    try:
-        hex_id_int = int(hex_id)
-    except ValueError as exc:
-        raise ValidationFailed("hex_id must be a numeric H3 cell id") from exc
+    hex_id_int = _parse_hex_id(hex_id)
 
     rows = await hex_contrib_repo.get_contributors_for_hex(conn, sector_id, hex_id_int)
     return [ContributorOut(**asdict(row)) for row in rows]

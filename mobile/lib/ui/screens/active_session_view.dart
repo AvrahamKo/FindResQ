@@ -24,15 +24,32 @@ import 'sos_button_view.dart';
 /// behind the overflow menu. The old version -- a column of six identical
 /// outlined buttons -- gave a distress signal exactly the same visual weight
 /// as "Sector reports", which is the wrong priority for a life-safety tool.
-class SessionActiveView extends ConsumerWidget {
+class SessionActiveView extends ConsumerStatefulWidget {
   final String sectorName;
 
   const SessionActiveView({super.key, required this.sectorName});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SessionActiveView> createState() => _SessionActiveViewState();
+}
+
+class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
+  SearchCoverageLayer _coverageLayer = SearchCoverageLayer.team;
+
+  @override
+  void initState() {
+    super.initState();
+    Future.microtask(
+      () => ref.read(personalTrailControllerProvider.notifier).ensureLoaded(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final tracking = ref.watch(locationTrackingControllerProvider);
     final sync = ref.watch(ingestSyncControllerProvider);
+    final coverage = ref.watch(coverageControllerProvider);
+    final personalTrail = ref.watch(personalTrailControllerProvider);
     final sos = ref.watch(sosControllerProvider);
     final sector = ref.watch(activeSectorProvider);
     final batteryAsync = ref.watch(batteryStatusProvider);
@@ -47,10 +64,13 @@ class SessionActiveView extends ConsumerWidget {
       body: Column(
         children: [
           TacticalStatusBar(
-            sectorName: sectorName,
+            sectorName: widget.sectorName,
             gps: _gpsChip(tracking),
             battery: _batteryChip(batteryPct),
             uplink: _uplinkChip(sync),
+          ),
+          _LastSyncLabel(
+            lastSyncAt: _latestSyncAt(sync, coverage.lastServerSyncAt),
           ),
           Expanded(
             child: Stack(
@@ -62,13 +82,26 @@ class SessionActiveView extends ConsumerWidget {
                     longitude: sample?.longitude,
                     accuracyM: sample?.accuracyM,
                     showBasemap: ref.watch(mapTilesEnabledProvider),
+                    teamCoverage: coverage.teamCells,
+                    personalTrail: personalTrail,
+                    coverageLayer: _coverageLayer,
+                  ),
+                ),
+                Positioned(
+                  left: 12,
+                  top: 12,
+                  child: _CoverageToggle(
+                    value: _coverageLayer,
+                    onChanged: (value) => setState(() {
+                      _coverageLayer = value;
+                    }),
                   ),
                 ),
                 if (boundary.isEmpty)
                   const Positioned(
                     left: 12,
                     right: 12,
-                    top: 12,
+                    top: 58,
                     child: _MapNotice(
                       'Sector outline unavailable offline — your position is still tracked.',
                     ),
@@ -85,6 +118,13 @@ class SessionActiveView extends ConsumerWidget {
         ],
       ),
     );
+  }
+
+  DateTime? _latestSyncAt(SyncState sync, DateTime? coverageSyncAt) {
+    final ingestSyncAt = sync is SyncActive ? sync.lastSyncAt : null;
+    if (ingestSyncAt == null) return coverageSyncAt;
+    if (coverageSyncAt == null) return ingestSyncAt;
+    return ingestSyncAt.isAfter(coverageSyncAt) ? ingestSyncAt : coverageSyncAt;
   }
 
   StatusChipData _gpsChip(TrackingState tracking) => switch (tracking) {
@@ -168,6 +208,80 @@ class SessionActiveView extends ConsumerWidget {
   };
 }
 
+class _LastSyncLabel extends StatelessWidget {
+  final DateTime? lastSyncAt;
+
+  const _LastSyncLabel({required this.lastSyncAt});
+
+  @override
+  Widget build(BuildContext context) {
+    final local = lastSyncAt?.toLocal();
+    final value = local == null
+        ? 'Last sync: never'
+        : 'Last sync: ${_two(local.hour)}:${_two(local.minute)}:${_two(local.second)}';
+    return Container(
+      key: const Key('last_server_sync'),
+      width: double.infinity,
+      color: const Color(0xFF161B22),
+      padding: const EdgeInsets.fromLTRB(12, 2, 12, 4),
+      child: Text(
+        value,
+        textAlign: TextAlign.end,
+        style: const TextStyle(color: Color(0xFF8B949E), fontSize: 10),
+      ),
+    );
+  }
+
+  static String _two(int value) => value.toString().padLeft(2, '0');
+}
+
+class _CoverageToggle extends StatelessWidget {
+  final SearchCoverageLayer value;
+  final ValueChanged<SearchCoverageLayer> onChanged;
+
+  const _CoverageToggle({required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const Key('coverage_layer_toggle'),
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xE6161B22),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: SearchCoverageLayer.values
+            .map(
+              (layer) => InkWell(
+                key: Key('coverage_${layer.name}'),
+                onTap: () => onChanged(layer),
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: value == layer
+                        ? const Color(0xFF3FA9F5)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    layer == SearchCoverageLayer.team ? 'Team' : 'Mine',
+                    style: const TextStyle(color: Colors.white, fontSize: 11),
+                  ),
+                ),
+              ),
+            )
+            .toList(growable: false),
+      ),
+    );
+  }
+}
+
 class _MapNotice extends StatelessWidget {
   final String text;
   const _MapNotice(this.text);
@@ -202,11 +316,15 @@ class _MapActions extends ConsumerWidget {
         FloatingActionButton.small(
           key: const Key('tracking_toggle_button'),
           heroTag: 'tracking',
-          backgroundColor: trackingActive ? const Color(0xFF2ECC71) : const Color(0xFF30363D),
+          backgroundColor: trackingActive
+              ? const Color(0xFF2ECC71)
+              : const Color(0xFF30363D),
           foregroundColor: Colors.white,
           tooltip: trackingActive ? 'Stop tracking' : 'Start tracking',
           onPressed: () async {
-            final tracking = ref.read(locationTrackingControllerProvider.notifier);
+            final tracking = ref.read(
+              locationTrackingControllerProvider.notifier,
+            );
             final sync = ref.read(ingestSyncControllerProvider.notifier);
             if (trackingActive) {
               tracking.stop();
@@ -217,7 +335,8 @@ class _MapActions extends ConsumerWidget {
             // Only start uploading if tracking actually came up -- otherwise
             // the sync loop spins with nothing to send (see HANDOVER's note
             // on this exact bug in LocationStatusView).
-            if (ref.read(locationTrackingControllerProvider) is TrackingActive) {
+            if (ref.read(locationTrackingControllerProvider)
+                is TrackingActive) {
               await sync.start();
             }
           },
@@ -249,15 +368,23 @@ class _OverflowMenu extends StatelessWidget {
           };
           final builder = routes[value];
           if (builder == null) return;
-          Navigator.of(context).push(MaterialPageRoute(builder: (_) => builder()));
+          Navigator.of(
+            context,
+          ).push(MaterialPageRoute(builder: (_) => builder()));
         },
         itemBuilder: (context) => const [
           PopupMenuItem(value: 'reports', child: Text('Sector reports')),
           // Server-side RBAC is the real gate: a volunteer tapping this gets
           // a 403 from the backend rather than the client duplicating the
           // Lead/Commander check from a session field.
-          PopupMenuItem(value: 'sos_alerts', child: Text('SOS alerts (Lead/Commander)')),
-          PopupMenuItem(value: 'diagnostics', child: Text('Tracking diagnostics')),
+          PopupMenuItem(
+            value: 'sos_alerts',
+            child: Text('SOS alerts (Lead/Commander)'),
+          ),
+          PopupMenuItem(
+            value: 'diagnostics',
+            child: Text('Tracking diagnostics'),
+          ),
         ],
       ),
     );
@@ -305,7 +432,8 @@ class _ActionBar extends ConsumerWidget {
               key: const Key('hold_sos_button'),
               enabled: !isOpenAlert && !isBusy,
               label: isOpenAlert ? 'SOS ACTIVE' : 'HOLD FOR SOS',
-              onActivate: () => ref.read(sosControllerProvider.notifier).trigger(),
+              onActivate: () =>
+                  ref.read(sosControllerProvider.notifier).trigger(),
             ),
             Expanded(
               child: Align(
@@ -316,7 +444,9 @@ class _ActionBar extends ConsumerWidget {
                         icon: Icons.settings_backup_restore,
                         label: 'Manage',
                         onPressed: () => Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const SosButtonView()),
+                          MaterialPageRoute(
+                            builder: (_) => const SosButtonView(),
+                          ),
                         ),
                       )
                     : const SizedBox.shrink(),

@@ -27,6 +27,7 @@ import uuid
 from datetime import datetime, timezone
 
 import asyncpg
+import h3
 import pytest
 from fastapi.testclient import TestClient
 from nacl import utils as nacl_utils
@@ -241,9 +242,13 @@ class TestRealtimeBroadcast:
                     hex_message = by_type["hex_delta"]
                     assert hex_message["sector_id"] == str(sector_id)
                     assert len(hex_message["hexes"]) >= 1
-                    # Confirms schemas/coverage.py's hex_id-as-string safeguard
-                    # survives the realtime path too, not just the REST one.
-                    assert isinstance(hex_message["hexes"][0]["hex_id"], str)
+                    # The dashboard passes this value directly to h3-js.
+                    # Merely checking for a string is insufficient: a decimal
+                    # rendering of the integer is lossless JSON but is not a
+                    # valid H3 string and gets drawn on the wrong continent.
+                    wire_hex_id = hex_message["hexes"][0]["hex_id"]
+                    assert isinstance(wire_hex_id, str)
+                    assert h3.is_valid_cell(wire_hex_id)
 
                     presence_message = by_type["presence_delta"]
                     assert presence_message["sector_id"] == str(sector_id)

@@ -9,10 +9,12 @@ import 'package:lifesearch_mobile/core/api/api_client.dart';
 import 'package:lifesearch_mobile/core/providers.dart';
 import 'package:lifesearch_mobile/core/storage/stored_models.dart';
 import 'package:lifesearch_mobile/core/location/battery_info_provider.dart';
+import 'package:lifesearch_mobile/core/storage/search_map_store.dart';
 import 'package:lifesearch_mobile/core/storage/telemetry_buffer_store.dart';
 import 'package:lifesearch_mobile/ui/screens/active_session_view.dart';
 import 'package:lifesearch_mobile/ui/screens/report_form_view.dart';
 import 'package:lifesearch_mobile/ui/widgets/hold_to_activate_sos_button.dart';
+import 'package:lifesearch_mobile/ui/widgets/sector_map_view.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../../helpers/fake_battery_info_provider.dart';
@@ -53,7 +55,9 @@ void main() {
   // also exactly what the app shows offline.
   Widget wrap() => UncontrolledProviderScope(
     container: container,
-    child: const MaterialApp(home: SessionActiveView(sectorName: 'Ridge North')),
+    child: const MaterialApp(
+      home: SessionActiveView(sectorName: 'Ridge North'),
+    ),
   );
 
   setUp(() async {
@@ -77,12 +81,38 @@ void main() {
             path: inMemoryDatabasePath,
           ),
         ),
+        searchMapStoreProvider.overrideWithValue(
+          SearchMapStore(
+            factory: databaseFactoryFfiNoIsolate,
+            path: inMemoryDatabasePath,
+          ),
+        ),
         apiClientProvider.overrideWith(
           (ref) => ApiClient(
             baseUrl: 'http://test.invalid',
             httpClient: MockClient((request) async {
               requestedPaths.add(request.url.path);
               if (request.url.path == '/sos') return _json(_alertJson(), 201);
+              if (request.url.path == '/sectors/s1/hexes') {
+                return _json({
+                  'sector_id': 's1',
+                  'resolution': 12,
+                  'hexes': [
+                    {
+                      'hex_id': '8c2db2b25155dff',
+                      'cumulative_pod': 0.64,
+                      'valid_contributions': 2,
+                      'distinct_searchers': 2,
+                      'last_contribution_at': '2030-01-01T00:00:00Z',
+                      'boundary': [
+                        [31.721, 35.211],
+                        [31.722, 35.212],
+                        [31.721, 35.213],
+                      ],
+                    },
+                  ],
+                }, 200);
+              }
               if (request.url.path.startsWith('/sectors/')) {
                 return _json({
                   'id': 's1',
@@ -105,7 +135,9 @@ void main() {
                   },
                 }, 200);
               }
-              return _json({'error': {'code': 'x', 'message': 'unexpected'}}, 500);
+              return _json({
+                'error': {'code': 'x', 'message': 'unexpected'},
+              }, 500);
             }),
           ),
         ),
@@ -227,35 +259,36 @@ void main() {
     expect(requestedPaths.length, equals(requestsBefore));
   });
 
-  testWidgets('the quick report grid opens the form with the kind preselected', (
-    tester,
-  ) async {
-    await tester.pumpWidget(wrap());
-    await tester.pump();
+  testWidgets(
+    'the quick report grid opens the form with the kind preselected',
+    (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
 
-    await tester.tap(find.byKey(const Key('quick_report_button')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('quick_report_button')));
+      await tester.pumpAndSettle();
 
-    // All five wire-format kinds are offered.
-    for (final kind in const [
-      'subject_found',
-      'medical',
-      'item_found',
-      'hazard',
-      'no_passage',
-    ]) {
-      expect(find.byKey(Key('quick_report_$kind')), findsOneWidget);
-    }
+      // All five wire-format kinds are offered.
+      for (final kind in const [
+        'subject_found',
+        'medical',
+        'item_found',
+        'hazard',
+        'no_passage',
+      ]) {
+        expect(find.byKey(Key('quick_report_$kind')), findsOneWidget);
+      }
 
-    await tester.tap(find.byKey(const Key('quick_report_hazard')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('quick_report_hazard')));
+      await tester.pumpAndSettle();
 
-    expect(find.byType(ReportFormView), findsOneWidget);
-    final form = tester.widget<ReportFormView>(find.byType(ReportFormView));
-    expect(form.initialKind, equals('hazard'));
-    // The dropdown reflects it, rather than silently defaulting.
-    expect(find.text('Hazard'), findsOneWidget);
-  });
+      expect(find.byType(ReportFormView), findsOneWidget);
+      final form = tester.widget<ReportFormView>(find.byType(ReportFormView));
+      expect(form.initialKind, equals('hazard'));
+      // The dropdown reflects it, rather than silently defaulting.
+      expect(find.text('Hazard'), findsOneWidget);
+    },
+  );
 
   testWidgets('fetches the sector boundary with the ACCOUNT token', (
     tester,
@@ -271,5 +304,37 @@ void main() {
     // ~31.7 values, longitudes the ~35.2 ones.
     expect(sector.boundary.first.latitude, closeTo(31.70, 1e-9));
     expect(sector.boundary.first.longitude, closeTo(35.20, 1e-9));
+  });
+
+  testWidgets('shows cached team coverage and switches to personal trail', (
+    tester,
+  ) async {
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(requestedPaths.contains('/sectors/s1/hexes'), isTrue);
+    expect(find.byKey(const Key('coverage_layer_toggle')), findsOneWidget);
+    expect(find.text('Team'), findsOneWidget);
+    expect(find.text('Mine'), findsOneWidget);
+
+    var map = tester.widget<SectorMapView>(find.byType(SectorMapView));
+    expect(map.teamCoverage, hasLength(1));
+    expect(map.coverageLayer, SearchCoverageLayer.team);
+
+    await tester.tap(find.byKey(const Key('coverage_mine')));
+    await tester.pump();
+    map = tester.widget<SectorMapView>(find.byType(SectorMapView));
+    expect(map.coverageLayer, SearchCoverageLayer.mine);
+  });
+
+  testWidgets('shows the most recent server synchronization time', (
+    tester,
+  ) async {
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('last_server_sync')), findsOneWidget);
+    expect(find.textContaining('Last sync:'), findsOneWidget);
+    expect(find.text('Last sync: never'), findsNothing);
   });
 }

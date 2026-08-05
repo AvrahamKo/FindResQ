@@ -6,6 +6,7 @@
 /// in-memory fake, without touching controller logic at all.
 library;
 
+import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,6 +21,9 @@ import 'auth/auth_state.dart';
 import 'crypto/device_identity.dart';
 import 'crypto/mesh_crypto.dart';
 import 'crypto/sodium_provider.dart';
+import 'coverage/coverage_controller.dart';
+import 'coverage/coverage_state.dart';
+import 'coverage/personal_trail_controller.dart';
 import 'join/join_controller.dart';
 import 'join/join_state.dart';
 import 'location/battery_info_provider.dart';
@@ -36,6 +40,7 @@ import 'reports/reports_list_state.dart';
 import 'storage/key_value_store.dart';
 import 'storage/secure_key_value_store.dart';
 import 'storage/secure_storage_manager.dart';
+import 'storage/search_map_store.dart';
 import 'storage/telemetry_buffer_store.dart';
 import 'sos/sos_alerts_controller.dart';
 import 'sos/sos_alerts_state.dart';
@@ -50,7 +55,9 @@ final baseUrlProvider = Provider<String>(
   (ref) => throw UnimplementedError('baseUrlProvider must be overridden'),
 );
 
-final sodiumProvider = FutureProvider<Sodium>((ref) => SodiumProvider.instance());
+final sodiumProvider = FutureProvider<Sodium>(
+  (ref) => SodiumProvider.instance(),
+);
 
 final keyValueStoreProvider = Provider<KeyValueStore>(
   (ref) => SecureKeyValueStore(),
@@ -69,24 +76,26 @@ final deviceIdentityProvider = Provider<DeviceIdentity>((ref) {
   return DeviceIdentity(sodium);
 });
 
-final authControllerProvider =
-    StateNotifierProvider<AuthController, AuthState>((ref) {
-      final sodium = ref.watch(sodiumProvider).requireValue;
-      return AuthController(
-        api: ref.watch(apiClientProvider),
-        storage: ref.watch(secureStorageManagerProvider),
-        identity: ref.watch(deviceIdentityProvider),
-        sodium: sodium,
-      );
-    });
+final authControllerProvider = StateNotifierProvider<AuthController, AuthState>(
+  (ref) {
+    final sodium = ref.watch(sodiumProvider).requireValue;
+    return AuthController(
+      api: ref.watch(apiClientProvider),
+      storage: ref.watch(secureStorageManagerProvider),
+      identity: ref.watch(deviceIdentityProvider),
+      sodium: sodium,
+    );
+  },
+);
 
-final joinControllerProvider =
-    StateNotifierProvider<JoinController, JoinState>((ref) {
-      return JoinController(
-        api: ref.watch(apiClientProvider),
-        storage: ref.watch(secureStorageManagerProvider),
-      );
-    });
+final joinControllerProvider = StateNotifierProvider<JoinController, JoinState>(
+  (ref) {
+    return JoinController(
+      api: ref.watch(apiClientProvider),
+      storage: ref.watch(secureStorageManagerProvider),
+    );
+  },
+);
 
 // --- Location / telemetry buffer (Phase 5c) --------------------------------
 
@@ -116,6 +125,26 @@ final telemetryBufferStoreProvider = Provider<TelemetryBufferStore>((ref) {
   return store;
 });
 
+final searchMapStoreProvider = Provider<SearchMapStore>((ref) {
+  final store = SearchMapStore(
+    factory: ref.watch(databaseFactoryProvider),
+    path: 'lifesearch_search_map.db',
+  );
+  ref.onDispose(() => store.close());
+  return store;
+});
+
+final personalTrailControllerProvider =
+    StateNotifierProvider<PersonalTrailController, List<PersonalTrackPoint>>((
+      ref,
+    ) {
+      final controller = PersonalTrailController(
+        mapStore: ref.watch(searchMapStoreProvider),
+        storage: ref.watch(secureStorageManagerProvider),
+      );
+      return controller;
+    });
+
 final batteryInfoProvider = Provider<BatteryInfoProvider>(
   (ref) => BatteryPlusInfoProvider(),
 );
@@ -126,7 +155,10 @@ final locationSourceProvider = Provider<LocationSource>(
 
 final telemetryPacketBuilderProvider = Provider<TelemetryPacketBuilder>((ref) {
   final sodium = ref.watch(sodiumProvider).requireValue;
-  return TelemetryPacketBuilder(ref.watch(deviceIdentityProvider), MeshCrypto(sodium));
+  return TelemetryPacketBuilder(
+    ref.watch(deviceIdentityProvider),
+    MeshCrypto(sodium),
+  );
 });
 
 final locationTrackingControllerProvider =
@@ -140,6 +172,7 @@ final locationTrackingControllerProvider =
         buffer: ref.watch(telemetryBufferStoreProvider),
         storage: ref.watch(secureStorageManagerProvider),
         sodium: sodium,
+        personalTrail: ref.watch(personalTrailControllerProvider.notifier),
       );
     });
 
@@ -154,9 +187,34 @@ final ingestSyncControllerProvider =
       );
     });
 
+final coverageControllerProvider =
+    StateNotifierProvider.autoDispose<CoverageController, CoverageMapState>((
+      ref,
+    ) {
+      final controller = CoverageController(
+        api: ref.watch(apiClientProvider),
+        storage: ref.watch(secureStorageManagerProvider),
+        mapStore: ref.watch(searchMapStoreProvider),
+      );
+      unawaited(controller.start());
+      ref.listen<DateTime?>(
+        ingestSyncControllerProvider.select(
+          (sync) => sync is SyncActive ? sync.lastSyncAt : null,
+        ),
+        (previous, next) {
+          if (next != null && next != previous) {
+            unawaited(controller.refresh());
+          }
+        },
+      );
+      return controller;
+    });
+
 // --- SOS (Phase 6) -------------------------------------------------------
 
-final sosControllerProvider = StateNotifierProvider<SosController, SosState>((ref) {
+final sosControllerProvider = StateNotifierProvider<SosController, SosState>((
+  ref,
+) {
   return SosController(
     api: ref.watch(apiClientProvider),
     storage: ref.watch(secureStorageManagerProvider),
@@ -175,7 +233,10 @@ final sosAlertsControllerProvider =
 
 final reportPacketBuilderProvider = Provider<ReportPacketBuilder>((ref) {
   final sodium = ref.watch(sodiumProvider).requireValue;
-  return ReportPacketBuilder(ref.watch(deviceIdentityProvider), MeshCrypto(sodium));
+  return ReportPacketBuilder(
+    ref.watch(deviceIdentityProvider),
+    MeshCrypto(sodium),
+  );
 });
 
 final reportControllerProvider =
@@ -216,7 +277,10 @@ final activeSectorProvider = FutureProvider<SectorInfo?>((ref) async {
   try {
     return await ref
         .watch(apiClientProvider)
-        .getSector(accountToken: account.accessToken, sectorId: session.sectorId);
+        .getSector(
+          accountToken: account.accessToken,
+          sectorId: session.sectorId,
+        );
   } on Exception {
     return null;
   }

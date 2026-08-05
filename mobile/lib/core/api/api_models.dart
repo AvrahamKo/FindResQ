@@ -151,17 +151,16 @@ class MembershipInfo {
     this.sessionExpiresAt,
   });
 
-  factory MembershipInfo.fromJson(Map<String, dynamic> json) =>
-      MembershipInfo(
-        id: json['id'] as String,
-        sectorId: json['sector_id'] as String,
-        status: json['status'] as String,
-        role: json['role'] as String,
-        movementMode: json['movement_mode'] as String,
-        sessionExpiresAt: json['session_expires_at'] == null
-            ? null
-            : DateTime.parse(json['session_expires_at'] as String),
-      );
+  factory MembershipInfo.fromJson(Map<String, dynamic> json) => MembershipInfo(
+    id: json['id'] as String,
+    sectorId: json['sector_id'] as String,
+    status: json['status'] as String,
+    role: json['role'] as String,
+    movementMode: json['movement_mode'] as String,
+    sessionExpiresAt: json['session_expires_at'] == null
+        ? null
+        : DateTime.parse(json['session_expires_at'] as String),
+  );
 }
 
 /// One WGS84 position.
@@ -226,6 +225,82 @@ class SectorInfo {
         .map(GeoPoint.fromGeoJson)
         .toList(growable: false);
   }
+}
+
+/// One derived H3 coverage cell. [boundary] is already expanded by the
+/// backend so the field app can render and cache it without an H3 runtime.
+class CoverageCell {
+  final String hexId;
+  final double cumulativePod;
+  final int distinctSearchers;
+  final DateTime? lastContributionAt;
+  final List<GeoPoint> boundary;
+
+  const CoverageCell({
+    required this.hexId,
+    required this.cumulativePod,
+    required this.distinctSearchers,
+    required this.lastContributionAt,
+    required this.boundary,
+  });
+
+  factory CoverageCell.fromJson(Map<String, dynamic> json) => CoverageCell(
+    hexId: json['hex_id'] as String,
+    cumulativePod: (json['cumulative_pod'] as num).toDouble(),
+    distinctSearchers: json['distinct_searchers'] as int,
+    lastContributionAt: json['last_contribution_at'] == null
+        ? null
+        : DateTime.parse(json['last_contribution_at'] as String),
+    // Coverage boundaries use the native H3 [lat, lng] order, unlike
+    // GeoJSON sector boundaries. Keep the two parsers deliberately distinct.
+    boundary: (json['boundary'] as List<dynamic>? ?? const [])
+        .whereType<List>()
+        .where((pair) => pair.length >= 2)
+        .map(
+          (pair) => GeoPoint(
+            latitude: (pair[0] as num).toDouble(),
+            longitude: (pair[1] as num).toDouble(),
+          ),
+        )
+        .toList(growable: false),
+  );
+
+  Map<String, dynamic> toJson() => {
+    'hex_id': hexId,
+    'cumulative_pod': cumulativePod,
+    'distinct_searchers': distinctSearchers,
+    'last_contribution_at': lastContributionAt?.toIso8601String(),
+    'boundary': boundary
+        .map((point) => [point.latitude, point.longitude])
+        .toList(growable: false),
+  };
+}
+
+class CoverageSnapshot {
+  final String sectorId;
+  final int resolution;
+  final List<CoverageCell> cells;
+
+  const CoverageSnapshot({
+    required this.sectorId,
+    required this.resolution,
+    required this.cells,
+  });
+
+  factory CoverageSnapshot.fromJson(Map<String, dynamic> json) =>
+      CoverageSnapshot(
+        sectorId: json['sector_id'] as String,
+        resolution: json['resolution'] as int,
+        cells: (json['hexes'] as List<dynamic>? ?? const [])
+            .map((item) => CoverageCell.fromJson(item as Map<String, dynamic>))
+            .toList(growable: false),
+      );
+
+  Map<String, dynamic> toJson() => {
+    'sector_id': sectorId,
+    'resolution': resolution,
+    'hexes': cells.map((cell) => cell.toJson()).toList(growable: false),
+  };
 }
 
 class SessionIssueResult {
@@ -395,14 +470,15 @@ class ReportIngestResult {
     required this.malformed,
   });
 
-  factory ReportIngestResult.fromJson(Map<String, dynamic> json) => ReportIngestResult(
-    accepted: json['accepted'] as int,
-    duplicate: json['duplicate'] as int,
-    decryptFailed: json['decrypt_failed'] as int,
-    signatureInvalid: json['signature_invalid'] as int,
-    wrongDevice: json['wrong_device'] as int,
-    malformed: json['malformed'] as int,
-  );
+  factory ReportIngestResult.fromJson(Map<String, dynamic> json) =>
+      ReportIngestResult(
+        accepted: json['accepted'] as int,
+        duplicate: json['duplicate'] as int,
+        decryptFailed: json['decrypt_failed'] as int,
+        signatureInvalid: json['signature_invalid'] as int,
+        wrongDevice: json['wrong_device'] as int,
+        malformed: json['malformed'] as int,
+      );
 }
 
 /// Mirrors `backend/app/api/schemas/reports.py`'s `ReportOut`.

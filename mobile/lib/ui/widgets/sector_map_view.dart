@@ -3,6 +3,9 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../../core/api/api_models.dart';
+import '../../core/storage/search_map_store.dart';
+
+enum SearchCoverageLayer { team, mine }
 
 /// Tactical map: the sector boundary plus the searcher's own position.
 ///
@@ -17,6 +20,9 @@ class SectorMapView extends StatefulWidget {
   final double? longitude;
   final double? accuracyM;
   final bool showBasemap;
+  final List<CoverageCell> teamCoverage;
+  final List<PersonalTrackPoint> personalTrail;
+  final SearchCoverageLayer coverageLayer;
 
   const SectorMapView({
     super.key,
@@ -25,6 +31,9 @@ class SectorMapView extends StatefulWidget {
     this.longitude,
     this.accuracyM,
     this.showBasemap = true,
+    this.teamCoverage = const [],
+    this.personalTrail = const [],
+    this.coverageLayer = SearchCoverageLayer.team,
   });
 
   @override
@@ -42,6 +51,11 @@ class _SectorMapViewState extends State<SectorMapView> {
   LatLng? get _position => widget.latitude != null && widget.longitude != null
       ? LatLng(widget.latitude!, widget.longitude!)
       : null;
+
+  Color _podColor(double pod) {
+    final value = pod.clamp(0.0, 1.0);
+    return Color.lerp(const Color(0xFFE74C3C), const Color(0xFF2ECC71), value)!;
+  }
 
   /// Fits the sector ONCE, on the first frame that has a boundary. Re-fitting
   /// on every position update would fight the searcher every time they panned
@@ -69,13 +83,18 @@ class _SectorMapViewState extends State<SectorMapView> {
     return FlutterMap(
       mapController: _controller,
       options: MapOptions(
-        initialCenter: position ?? (ring.isNotEmpty ? ring.first : const LatLng(31.5, 34.8)),
+        initialCenter:
+            position ??
+            (ring.isNotEmpty ? ring.first : const LatLng(31.5, 34.8)),
         initialZoom: 14,
         interactionOptions: const InteractionOptions(
           // Rotation off: a searcher comparing this to a paper map or a
           // compass bearing needs north to stay north, and a stray two-finger
           // twist while panning with gloves is easy to do and hard to undo.
-          flags: InteractiveFlag.pinchZoom | InteractiveFlag.drag | InteractiveFlag.doubleTapZoom,
+          flags:
+              InteractiveFlag.pinchZoom |
+              InteractiveFlag.drag |
+              InteractiveFlag.doubleTapZoom,
         ),
       ),
       children: [
@@ -83,6 +102,45 @@ class _SectorMapViewState extends State<SectorMapView> {
           TileLayer(
             urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
             userAgentPackageName: 'com.lifesearch.mobile',
+          ),
+        if (widget.coverageLayer == SearchCoverageLayer.team &&
+            widget.teamCoverage.isNotEmpty)
+          PolygonLayer(
+            polygons: widget.teamCoverage
+                .where((cell) => cell.boundary.length >= 3)
+                .map(
+                  (cell) => Polygon(
+                    points: cell.boundary
+                        .map((point) => LatLng(point.latitude, point.longitude))
+                        .toList(growable: false),
+                    borderColor: _podColor(cell.cumulativePod),
+                    borderStrokeWidth: 1,
+                    color: _podColor(
+                      cell.cumulativePod,
+                    ).withValues(alpha: 0.48),
+                  ),
+                )
+                .toList(growable: false),
+          ),
+        if (widget.coverageLayer == SearchCoverageLayer.mine &&
+            widget.personalTrail.length >= 2)
+          PolylineLayer(
+            polylines: [
+              Polyline(
+                points: widget.personalTrail
+                    .map((p) => LatLng(p.latitude, p.longitude))
+                    .toList(growable: false),
+                strokeWidth: 10,
+                color: const Color(0x553FA9F5),
+              ),
+              Polyline(
+                points: widget.personalTrail
+                    .map((p) => LatLng(p.latitude, p.longitude))
+                    .toList(growable: false),
+                strokeWidth: 3,
+                color: const Color(0xFF3FA9F5),
+              ),
+            ],
           ),
         if (ring.length >= 3)
           PolygonLayer(

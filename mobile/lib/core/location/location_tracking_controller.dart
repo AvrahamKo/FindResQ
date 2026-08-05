@@ -16,6 +16,7 @@ import 'dart:typed_data';
 import 'package:sodium/sodium.dart';
 import 'package:state_notifier/state_notifier.dart';
 
+import '../coverage/personal_trail_controller.dart';
 import '../storage/secure_storage_manager.dart';
 import '../storage/stored_models.dart';
 import '../storage/telemetry_buffer_store.dart';
@@ -34,6 +35,7 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
   final TelemetryBufferStore _buffer;
   final SecureStorageManager _storage;
   final Sodium _sodium;
+  final PersonalTrailController? _personalTrail;
 
   StreamSubscription<LocationSample>? _subscription;
   SamplingTierName? _currentTier;
@@ -51,6 +53,7 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
     required TelemetryBufferStore buffer,
     required SecureStorageManager storage,
     required Sodium sodium,
+    PersonalTrailController? personalTrail,
   }) : _location = location,
        _battery = battery,
        _policy = policy,
@@ -58,6 +61,7 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
        _buffer = buffer,
        _storage = storage,
        _sodium = sodium,
+       _personalTrail = personalTrail,
        super(const TrackingIdle());
 
   Future<void> start() async {
@@ -153,6 +157,8 @@ class LocationTrackingController extends StateNotifier<TrackingState> {
       session: session,
       batteryPct: batteryPct,
     );
+    final trail = _personalTrail;
+    if (trail != null) unawaited(trail.record(sample));
     _sampleCount++;
     _lastSample = sample;
 

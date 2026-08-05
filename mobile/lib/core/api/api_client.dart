@@ -232,6 +232,20 @@ class ApiClient {
     return SectorInfo.fromJson(_decodeObject(response));
   }
 
+  /// Aggregated team coverage. Any approved sector member may read it; the
+  /// response includes expanded cell boundaries so it is directly cacheable
+  /// and renderable by the field app while offline.
+  Future<CoverageSnapshot> getSectorCoverage({
+    required String accountToken,
+    required String sectorId,
+  }) async {
+    final response = await _get(
+      '/sectors/$sectorId/hexes',
+      bearerToken: accountToken,
+    );
+    return CoverageSnapshot.fromJson(_decodeObject(response));
+  }
+
   Future<SessionIssueResult> claimSession({
     required String accountToken,
     required String membershipId,

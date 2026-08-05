@@ -4,13 +4,16 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, field_serializer
+import h3
+from pydantic import BaseModel, computed_field, field_serializer
 
 
 class HexCoverageOut(BaseModel):
     # H3 cell ids are 64-bit integers -- larger than JavaScript's safe
-    # integer range (2**53-1). Serialized as a string so a JS-based
-    # dashboard never silently loses precision on a raw JSON number.
+    # integer range (2**53-1). The wire value must therefore be a string,
+    # and h3-js specifically expects H3's canonical hexadecimal string
+    # representation (for example ``8c2db2b25155dff``), not a decimal
+    # rendering of the underlying integer.
     hex_id: int
     cumulative_pod: Decimal
     valid_contributions: int
@@ -19,7 +22,19 @@ class HexCoverageOut(BaseModel):
 
     @field_serializer("hex_id")
     def _hex_id_as_string(self, value: int) -> str:
-        return str(value)
+        return h3.int_to_str(value)
+
+    @computed_field(return_type=list[tuple[float, float]])
+    @property
+    def boundary(self) -> list[tuple[float, float]]:
+        """Cell ring in ``[lat, lng]`` order for map clients.
+
+        The web dashboard can derive this from h3-js, but the field app
+        deliberately carries no H3 runtime. Sending the six vertices lets
+        it cache and render coverage offline without adding another native
+        dependency or duplicating H3 conversion code.
+        """
+        return list(h3.cell_to_boundary(h3.int_to_str(self.hex_id)))
 
 
 class CoverageResponse(BaseModel):
