@@ -8,8 +8,12 @@ import 'app.dart';
 import 'core/platform_base_url.dart';
 import 'core/providers.dart';
 
-/// A real device (Android or iOS) needs the host machine's actual LAN IP,
-/// which cannot be auto-detected here -- that case must go through
+/// Android (emulator or physical, over USB) reaches the host through an ADB
+/// reverse tunnel -- run `adb reverse tcp:8000 tcp:8000` once per device
+/// connection; it does not survive unplugging.
+///
+/// For a device on Wi-Fi with no cable, or an iOS device, pass the host's
+/// LAN IP explicitly -- it cannot be auto-detected here:
 /// `--dart-define=API_BASE_URL=http://<host-lan-ip>:8000`.
 String _defaultBaseUrl() {
   return computeDefaultBaseUrl(
