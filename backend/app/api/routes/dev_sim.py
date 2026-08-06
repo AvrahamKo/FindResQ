@@ -211,7 +211,9 @@ async def create_unit(
             mesh_capable=False,
             label=f"{SIM_LABEL} {payload.name}",
         )
-        membership = await memberships_repo.create_pending(
+        # A simulated unit is always a brand-new user and a brand-new device,
+        # so the reopen branch is unreachable here and this cannot return None.
+        membership = await memberships_repo.create_or_reopen_pending(
             conn,
             sector_id=swe.sector.id,
             user_id=user_id,
@@ -220,6 +222,7 @@ async def create_unit(
             battery_at_join=90,
             powerbank_attested=True,
         )
+        assert membership is not None
         expires_at = datetime.now(timezone.utc) + timedelta(hours=_SESSION_TTL_HOURS)
         approved = await memberships_repo.approve(
             conn,
@@ -395,6 +398,21 @@ async def delete_all_units(conn: ConnDep, settings: SettingsDep) -> dict:
             await conn.execute("DELETE FROM track_segments WHERE device_id = ANY($1::uuid[])", device_ids)
             await conn.execute("DELETE FROM sector_memberships WHERE device_id = ANY($1::uuid[])", device_ids)
             await conn.execute("DELETE FROM devices WHERE id = ANY($1::uuid[])", device_ids)
+            # `sectors.lead_user_id` has no ON DELETE action, so a simulated
+            # unit that was promoted to Sector Lead pins its own user row in
+            # place and makes this whole teardown fail with a foreign-key
+            # violation -- leaving the operator with a half-cleared
+            # simulator and no obvious way to finish the job. Vacate the
+            # pointer first; the sector itself is real data and is kept.
+            await conn.execute(
+                """
+                UPDATE sectors SET lead_user_id = NULL
+                WHERE lead_user_id IN (
+                    SELECT id FROM users WHERE display_name LIKE $1
+                )
+                """,
+                f"{SIM_LABEL}%",
+            )
             await conn.execute(
                 "DELETE FROM users WHERE display_name LIKE $1", f"{SIM_LABEL}%"
             )

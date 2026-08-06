@@ -303,6 +303,150 @@ class CoverageSnapshot {
   };
 }
 
+/// One teammate's continuous traverse, as a drawable polyline.
+///
+/// The counterpart to [CoverageCell], and the two answer different
+/// questions. A cell is DERIVED team coverage -- how thoroughly some ground
+/// has been swept, with no notion of who or when. A track is the RAW path a
+/// specific searcher walked, in order. On the ground the second is what
+/// makes the first legible: whether anyone has been down a particular draw,
+/// whether a teammate is working toward you or away, whether a line stopped
+/// because the terrain did or because the person did.
+class TeamTrack {
+  final String segmentId;
+  final String userId;
+  final String deviceId;
+  final String movementMode;
+  final DateTime startedAt;
+
+  /// Null while the searcher is still walking this segment. A live track is
+  /// the one worth drawing brightest -- it is a person currently moving.
+  final DateTime? endedAt;
+
+  /// Raw points recorded. May exceed `points.length`: the backend simplifies
+  /// the polyline for transport (~1m tolerance, below GPS accuracy) but does
+  /// not fake the count.
+  final int pointCount;
+
+  final List<GeoPoint> points;
+
+  const TeamTrack({
+    required this.segmentId,
+    required this.userId,
+    required this.deviceId,
+    required this.movementMode,
+    required this.startedAt,
+    required this.endedAt,
+    required this.pointCount,
+    required this.points,
+  });
+
+  bool get isLive => endedAt == null;
+
+  factory TeamTrack.fromJson(Map<String, dynamic> json) => TeamTrack(
+    segmentId: json['segment_id'] as String,
+    userId: json['user_id'] as String,
+    deviceId: json['device_id'] as String,
+    movementMode: json['movement_mode'] as String,
+    startedAt: DateTime.parse(json['started_at'] as String),
+    endedAt: json['ended_at'] == null
+        ? null
+        : DateTime.parse(json['ended_at'] as String),
+    pointCount: json['point_count'] as int,
+    // Already [lat, lng] -- the backend swaps out of GeoJSON order once,
+    // server-side, precisely so no client has to remember to. Do NOT reuse
+    // GeoPoint.fromGeoJson here; it would transpose them back.
+    points: (json['points'] as List<dynamic>? ?? const [])
+        .whereType<List>()
+        .where((pair) => pair.length >= 2)
+        .map(
+          (pair) => GeoPoint(
+            latitude: (pair[0] as num).toDouble(),
+            longitude: (pair[1] as num).toDouble(),
+          ),
+        )
+        .toList(growable: false),
+  );
+}
+
+class TeamTracksSnapshot {
+  final String sectorId;
+  final List<TeamTrack> tracks;
+
+  /// The server's own clock at query time. Passed back as the next `since`
+  /// so a handset with a skewed clock cannot silently skip or endlessly
+  /// re-fetch its teammates' movements.
+  final DateTime serverTime;
+
+  const TeamTracksSnapshot({
+    required this.sectorId,
+    required this.tracks,
+    required this.serverTime,
+  });
+
+  factory TeamTracksSnapshot.fromJson(Map<String, dynamic> json) =>
+      TeamTracksSnapshot(
+        sectorId: json['sector_id'] as String,
+        tracks: (json['tracks'] as List<dynamic>? ?? const [])
+            .map((item) => TeamTrack.fromJson(item as Map<String, dynamic>))
+            .toList(growable: false),
+        serverTime: DateTime.parse(json['server_time'] as String),
+      );
+}
+
+/// What the signed-in user may do in a sector, as decided by the BACKEND.
+///
+/// Fetched rather than derived from the stored session's `role`, which is a
+/// snapshot taken when the session was claimed: a volunteer promoted to
+/// Sector Lead an hour into a callout still carries `role: volunteer` in
+/// that blob until they re-claim. Asking the server means the UI and the
+/// enforcement can never disagree.
+class SectorPermissions {
+  final String sectorId;
+  final String role;
+  final bool isCommander;
+  final bool isSectorManager;
+  final bool canAcknowledgeAlerts;
+  final bool canDeleteAlerts;
+  final bool canModerateMembers;
+
+  const SectorPermissions({
+    required this.sectorId,
+    required this.role,
+    required this.isCommander,
+    required this.isSectorManager,
+    required this.canAcknowledgeAlerts,
+    required this.canDeleteAlerts,
+    required this.canModerateMembers,
+  });
+
+  /// The safe default for a client that could not reach the server: assume
+  /// NO elevated permission. Hiding a control a Lead is entitled to is a
+  /// cosmetic problem they can resolve by reconnecting; showing an
+  /// Acknowledge button to a searcher who cannot use it invites them to
+  /// believe an alert has been picked up when the server refused it.
+  static const none = SectorPermissions(
+    sectorId: '',
+    role: 'volunteer',
+    isCommander: false,
+    isSectorManager: false,
+    canAcknowledgeAlerts: false,
+    canDeleteAlerts: false,
+    canModerateMembers: false,
+  );
+
+  factory SectorPermissions.fromJson(Map<String, dynamic> json) =>
+      SectorPermissions(
+        sectorId: json['sector_id'] as String,
+        role: json['role'] as String,
+        isCommander: json['is_commander'] as bool,
+        isSectorManager: json['is_sector_manager'] as bool,
+        canAcknowledgeAlerts: json['can_acknowledge_alerts'] as bool,
+        canDeleteAlerts: json['can_delete_alerts'] as bool,
+        canModerateMembers: json['can_moderate_members'] as bool,
+      );
+}
+
 class SessionIssueResult {
   final String accessToken;
   final DateTime expiresAt;

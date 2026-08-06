@@ -67,7 +67,11 @@ async def dashboard_socket(websocket: WebSocket, event_id: uuid.UUID) -> None:
         await websocket.close(code=4401, reason="invalid or expired ticket")
         return
 
-    await manager.connect(event_id, websocket)
+    # The user id is retained per-socket so the server can hang up on one
+    # specific person when their access is revoked -- after the handshake
+    # there are no further requests to re-authorize, so a push stream can
+    # only be stopped by closing it. See ConnectionManager.disconnect_user.
+    await manager.connect(event_id, websocket, user_id)
     logger.info("dashboard socket connected user_id=%s event_id=%s", user_id, event_id)
 
     try:

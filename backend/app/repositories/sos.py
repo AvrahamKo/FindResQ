@@ -16,7 +16,7 @@ from datetime import datetime
 
 import asyncpg
 
-_OPEN_STATUSES = ("active", "acknowledged")
+OPEN_STATUSES = ("active", "acknowledged")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +65,7 @@ async def get_open_for_device(
         WHERE device_id = $1 AND status = ANY($2::text[])
         """,
         device_id,
-        list(_OPEN_STATUSES),
+        list(OPEN_STATUSES),
     )
     return _to_alert(row) if row is not None else None
 
@@ -150,7 +150,7 @@ async def resolve(
         """,
         alert_id,
         by_user_id,
-        list(_OPEN_STATUSES),
+        list(OPEN_STATUSES),
     )
     return _to_alert(row) if row is not None else None
 
@@ -164,9 +164,49 @@ async def cancel(conn: asyncpg.Connection, alert_id: uuid.UUID) -> SosAlert | No
         RETURNING {_SELECT_COLUMNS}
         """,
         alert_id,
-        list(_OPEN_STATUSES),
+        list(OPEN_STATUSES),
     )
     return _to_alert(row) if row is not None else None
+
+
+async def delete(conn: asyncpg.Connection, alert_id: uuid.UUID) -> SosAlert | None:
+    """Permanently removes ONE alert, returning what was removed (so the
+    caller can log and broadcast it) or None if it was already gone.
+
+    A hard DELETE, not a soft 'dismissed' flag. An SOS that has been
+    resolved or cancelled has already served its entire purpose -- unlike a
+    membership, nothing downstream references `sos_alerts`, so there is no
+    attribution to preserve and a tombstone would only be clutter with extra
+    steps. The `sos_alerts_notify_deleted` trigger (migration 0008) is what
+    turns this into a realtime removal on every connected dashboard.
+    """
+    row = await conn.fetchrow(
+        f"DELETE FROM sos_alerts WHERE id = $1 RETURNING {_SELECT_COLUMNS}", alert_id
+    )
+    return _to_alert(row) if row is not None else None
+
+
+async def delete_closed_for_sector(
+    conn: asyncpg.Connection, sector_id: uuid.UUID
+) -> list[uuid.UUID]:
+    """Bulk 'clear the list': deletes every CLOSED (resolved/cancelled)
+    alert in one sector, returning the ids removed.
+
+    Open alerts are excluded at the SQL level rather than filtered by the
+    caller. This is the operation most likely to be run in a hurry on a
+    cluttered screen, and the one place where "clear everything" must never
+    be able to mean "including the one someone is still waiting on".
+    """
+    rows = await conn.fetch(
+        """
+        DELETE FROM sos_alerts
+        WHERE sector_id = $1 AND NOT (status = ANY($2::text[]))
+        RETURNING id
+        """,
+        sector_id,
+        list(OPEN_STATUSES),
+    )
+    return [row["id"] for row in rows]
 
 
 async def list_for_sector(

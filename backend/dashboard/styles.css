@@ -114,6 +114,11 @@ a { color: var(--accent); }
 }
 .event-row:hover { border-color: var(--accent); }
 .event-row .status { font-size: 12px; color: var(--text-dim); text-transform: uppercase; }
+/* The row itself navigates, so the delete button needs its own hit area and
+   room to breathe -- `justify-content: space-between` alone would leave it
+   flush against the status label. */
+.event-row .status { margin-left: auto; }
+.event-row button.danger { margin-left: 16px; padding: 4px 12px; font-size: 12px; }
 .new-event-form { display: flex; gap: 8px; margin-bottom: 20px; }
 .new-event-form input { flex: 1; }
 
@@ -239,8 +244,13 @@ a { color: var(--accent); }
 .alert-card.sos { border-left: 3px solid var(--danger); }
 .alert-card.report { border-left: 3px solid var(--accent); }
 .alert-card.approval { border-left: 3px solid #9b59b6; }
+/* A closed (resolved/cancelled) alert is history, not a call for help --
+   dimmed and stripped of the danger rail so it cannot read as live on a
+   glance at a crowded panel. */
+.alert-card.sos.closed { border-left-color: var(--text-dim); opacity: 0.62; }
 .alert-card .meta { color: var(--text-dim); font-size: 11px; margin: 2px 0 8px; }
-.alert-card .actions { display: flex; gap: 6px; }
+.alert-card .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.alert-card .actions .panel-hint { margin: 0; font-size: 11px; }
 .alert-card .actions button { padding: 4px 10px; font-size: 12px; }
 .empty-hint { color: var(--text-dim); font-size: 12px; padding: 4px; }
 

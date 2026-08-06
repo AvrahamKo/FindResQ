@@ -246,6 +246,39 @@ class ApiClient {
     return CoverageSnapshot.fromJson(_decodeObject(response));
   }
 
+  /// Every team member's scan path in the sector -- not just this device's.
+  ///
+  /// Pass the previous response's `serverTime` as [since] to fetch only what
+  /// has moved. A delta REPLACES the segments it names (each carries its
+  /// full current polyline); merge by `segmentId`, never append.
+  Future<TeamTracksSnapshot> getSectorTracks({
+    required String accountToken,
+    required String sectorId,
+    DateTime? since,
+  }) async {
+    final query = since == null
+        ? ''
+        : '?since=${Uri.encodeQueryComponent(since.toUtc().toIso8601String())}';
+    final response = await _get(
+      '/sectors/$sectorId/tracks$query',
+      bearerToken: accountToken,
+    );
+    return TeamTracksSnapshot.fromJson(_decodeObject(response));
+  }
+
+  /// The caller's own capabilities in a sector. Used to hide actions the
+  /// backend would refuse -- see [SectorPermissions].
+  Future<SectorPermissions> getSectorPermissions({
+    required String accountToken,
+    required String sectorId,
+  }) async {
+    final response = await _get(
+      '/sectors/$sectorId/permissions',
+      bearerToken: accountToken,
+    );
+    return SectorPermissions.fromJson(_decodeObject(response));
+  }
+
   Future<SessionIssueResult> claimSession({
     required String accountToken,
     required String membershipId,

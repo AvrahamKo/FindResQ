@@ -60,6 +60,21 @@ export const api = {
   // Irreversible -- there is no corresponding "reopen".
   endEvent: (eventId) => request("POST", `/events/${eventId}/end`),
 
+  // DESTRUCTIVE, and categorically different from endEvent: this deletes
+  // the callout instead of closing it. Sectors, memberships, tracks, the
+  // coverage ledger, reports, alerts and the subject record all go with it
+  // (FK cascade), every dashboard socket for the event is closed, and there
+  // is no recovery. Returns counts of what was removed. Commander only.
+  deleteEvent: (eventId) => request("DELETE", `/events/${eventId}`),
+
+  // Removes a user from an event ENTIRELY -- every sector, every device --
+  // and drops any Lead role they held. Their sessions stop working on the
+  // next request and their live socket is closed immediately. Their scan
+  // history is deliberately KEPT and stays attributed to them; the coverage
+  // map must not un-search ground that really was walked. Commander only.
+  removeEventMember: (eventId, userId) =>
+    request("DELETE", `/events/${eventId}/members/${userId}`),
+
   // --- Subject (missing person) ------------------------------------------
   // Commander-only, both directions. "No subject recorded yet" is a 404, not
   // an empty body, so it is normalised to null here -- it is an ordinary
@@ -132,8 +147,30 @@ export const api = {
   getHexes: (sectorId) => request("GET", `/sectors/${sectorId}/hexes`),
   getPresence: (sectorId) => request("GET", `/sectors/${sectorId}/presence`),
   getSos: (sectorId) => request("GET", `/sectors/${sectorId}/sos`),
+  // Acknowledge/resolve are Sector-Manager-or-Commander only server-side
+  // (require_alert_moderator). The dashboard hides them for anyone else
+  // rather than letting a 403 be the explanation.
   acknowledgeSos: (alertId) => request("POST", `/sos/${alertId}/acknowledge`),
   resolveSos: (alertId) => request("POST", `/sos/${alertId}/resolve`),
+  // Clearing an obsolete alert. The backend REFUSES while an alert is still
+  // open (active/acknowledged) -- resolve or cancel it first -- so this is
+  // only ever offered on alerts that are already over. Both endpoints
+  // return { sector_id, deleted_ids }, and each deletion also arrives as a
+  // `sos_deleted` message over the socket, including on other dashboards.
+  deleteSos: (alertId) => request("DELETE", `/sos/${alertId}`),
+  clearClosedSos: (sectorId) => request("DELETE", `/sectors/${sectorId}/sos`),
+
+  // The caller's own capabilities in a sector, decided server-side by the
+  // same checks that enforce them (see routes/sectors.py).
+  getSectorPermissions: (sectorId) => request("GET", `/sectors/${sectorId}/permissions`),
+
+  // Every team member's scan path in the sector, newest first. Distinct
+  // from getHexes: that is derived POD per cell, this is who walked where.
+  getTracks: (sectorId, since) =>
+    request(
+      "GET",
+      `/sectors/${sectorId}/tracks${since ? `?since=${encodeURIComponent(since)}` : ""}`
+    ),
 
   getReports: (sectorId) => request("GET", `/sectors/${sectorId}/reports`),
   acknowledgeReport: (reportId) => request("POST", `/reports/${reportId}/acknowledge`),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/api/api_models.dart';
 import '../../core/location/tracking_state.dart';
 import '../../core/providers.dart';
 import '../../core/sos/sos_state.dart';
@@ -49,6 +50,13 @@ class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
     final tracking = ref.watch(locationTrackingControllerProvider);
     final sync = ref.watch(ingestSyncControllerProvider);
     final coverage = ref.watch(coverageControllerProvider);
+    // Watched only while the Team layer is selected: this provider is
+    // autoDispose and drives a 20s polling timer, so leaving it subscribed
+    // on the Mine layer would keep a radio waking up for data nothing is
+    // drawing.
+    final teamTracks = _coverageLayer == SearchCoverageLayer.team
+        ? ref.watch(teamTracksControllerProvider).ordered
+        : const <TeamTrack>[];
     final personalTrail = ref.watch(personalTrailControllerProvider);
     final sos = ref.watch(sosControllerProvider);
     final sector = ref.watch(activeSectorProvider);
@@ -83,6 +91,7 @@ class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
                     accuracyM: sample?.accuracyM,
                     showBasemap: ref.watch(mapTilesEnabledProvider),
                     teamCoverage: coverage.teamCells,
+                    teamTracks: teamTracks,
                     personalTrail: personalTrail,
                     coverageLayer: _coverageLayer,
                   ),
@@ -349,9 +358,18 @@ class _MapActions extends ConsumerWidget {
   }
 }
 
-class _OverflowMenu extends StatelessWidget {
+class _OverflowMenu extends ConsumerWidget {
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The SOS alerts screen is Sector-Manager/Commander only end to end:
+    // even LISTING a sector's alerts requires that role server-side. Showing
+    // the entry to a searcher led them to a screen that could only ever
+    // render a permission error -- so it is omitted entirely for them rather
+    // than shown with the role in brackets as a warning.
+    final permissions = ref
+        .watch(sectorPermissionsProvider)
+        .maybeWhen(data: (value) => value, orElse: () => SectorPermissions.none);
+
     return Container(
       decoration: const BoxDecoration(
         color: Color(0xFF30363D),
@@ -372,16 +390,15 @@ class _OverflowMenu extends StatelessWidget {
             context,
           ).push(MaterialPageRoute(builder: (_) => builder()));
         },
-        itemBuilder: (context) => const [
-          PopupMenuItem(value: 'reports', child: Text('Sector reports')),
-          // Server-side RBAC is the real gate: a volunteer tapping this gets
-          // a 403 from the backend rather than the client duplicating the
-          // Lead/Commander check from a session field.
-          PopupMenuItem(
-            value: 'sos_alerts',
-            child: Text('SOS alerts (Lead/Commander)'),
-          ),
-          PopupMenuItem(
+        itemBuilder: (context) => [
+          const PopupMenuItem(value: 'reports', child: Text('Sector reports')),
+          if (permissions.canAcknowledgeAlerts)
+            const PopupMenuItem(
+              key: Key('menu_sos_alerts'),
+              value: 'sos_alerts',
+              child: Text('SOS alerts'),
+            ),
+          const PopupMenuItem(
             value: 'diagnostics',
             child: Text('Tracking diagnostics'),
           ),

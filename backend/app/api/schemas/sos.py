@@ -14,6 +14,18 @@ class SosTriggerRequest(BaseModel):
     lng: float | None = None
 
 
+class SosDeleteResult(BaseModel):
+    """Which alerts a clear operation removed.
+
+    A list even for the single-alert endpoint, so a client can handle both
+    `DELETE /sos/{id}` and the bulk `DELETE /sectors/{id}/sos` with one
+    code path.
+    """
+
+    sector_id: uuid.UUID
+    deleted_ids: list[uuid.UUID]
+
+
 class SosOut(BaseModel):
     id: uuid.UUID
     sector_id: uuid.UUID

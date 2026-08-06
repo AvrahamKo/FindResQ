@@ -21,6 +21,13 @@ class SectorMapView extends StatefulWidget {
   final double? accuracyM;
   final bool showBasemap;
   final List<CoverageCell> teamCoverage;
+
+  /// Every team member's scan path, this searcher's included. Drawn on the
+  /// TEAM layer only, on top of the POD hexes: the hexes say how well ground
+  /// has been swept, these say who actually walked where -- which is what
+  /// makes the hexes actionable rather than just a heat map.
+  final List<TeamTrack> teamTracks;
+
   final List<PersonalTrackPoint> personalTrail;
   final SearchCoverageLayer coverageLayer;
 
@@ -32,6 +39,7 @@ class SectorMapView extends StatefulWidget {
     this.accuracyM,
     this.showBasemap = true,
     this.teamCoverage = const [],
+    this.teamTracks = const [],
     this.personalTrail = const [],
     this.coverageLayer = SearchCoverageLayer.team,
   });
@@ -55,6 +63,57 @@ class _SectorMapViewState extends State<SectorMapView> {
   Color _podColor(double pod) {
     final value = pod.clamp(0.0, 1.0);
     return Color.lerp(const Color(0xFFE74C3C), const Color(0xFF2ECC71), value)!;
+  }
+
+  /// A stable colour per teammate, so the same person keeps the same line
+  /// across polls and app restarts. Derived from the user id rather than
+  /// from list position: positions shift as segments are added, and a track
+  /// that changes colour mid-search reads as a different searcher.
+  ///
+  /// Deliberately excludes red (reserved for SOS and low-POD ground) and
+  /// green (this device's own position marker).
+  static const _trackPalette = <Color>[
+    Color(0xFF3FA9F5), // blue
+    Color(0xFFF1C40F), // amber
+    Color(0xFF9B59B6), // violet
+    Color(0xFF1ABC9C), // teal
+    Color(0xFFE67E22), // orange
+    Color(0xFFEC87C0), // pink
+  ];
+
+  Color _trackColor(String userId) =>
+      _trackPalette[userId.hashCode.abs() % _trackPalette.length];
+
+  /// Team paths: a wide translucent casing under a solid core, so lines stay
+  /// legible where several searchers have crossed the same ground -- the
+  /// exact place a single-stroke line turns into an unreadable tangle.
+  List<Polyline> _teamTrackPolylines() {
+    final polylines = <Polyline>[];
+    for (final track in widget.teamTracks) {
+      if (track.points.length < 2) continue;
+      final points = track.points
+          .map((p) => LatLng(p.latitude, p.longitude))
+          .toList(growable: false);
+      final color = _trackColor(track.userId);
+      polylines.add(
+        Polyline(
+          points: points,
+          strokeWidth: 7,
+          color: color.withValues(alpha: 0.28),
+        ),
+      );
+      polylines.add(
+        Polyline(
+          points: points,
+          // A still-moving searcher gets the heavier, fully opaque line.
+          // "Who is out there right now" is a different question from
+          // "where has anyone been", and both are on this layer at once.
+          strokeWidth: track.isLive ? 3.5 : 2,
+          color: color.withValues(alpha: track.isLive ? 1.0 : 0.7),
+        ),
+      );
+    }
+    return polylines;
   }
 
   /// Fits the sector ONCE, on the first frame that has a boundary. Re-fitting
@@ -122,6 +181,12 @@ class _SectorMapViewState extends State<SectorMapView> {
                 )
                 .toList(growable: false),
           ),
+        // Team scan paths sit ABOVE the POD hexes and BELOW the sector
+        // outline, so a teammate's line is never hidden by the shading it
+        // produced, and the boundary stays the topmost reference.
+        if (widget.coverageLayer == SearchCoverageLayer.team &&
+            widget.teamTracks.isNotEmpty)
+          PolylineLayer(polylines: _teamTrackPolylines()),
         if (widget.coverageLayer == SearchCoverageLayer.mine &&
             widget.personalTrail.length >= 2)
           PolylineLayer(

@@ -24,6 +24,8 @@ import 'crypto/sodium_provider.dart';
 import 'coverage/coverage_controller.dart';
 import 'coverage/coverage_state.dart';
 import 'coverage/personal_trail_controller.dart';
+import 'coverage/team_tracks_controller.dart';
+import 'coverage/team_tracks_state.dart';
 import 'join/join_controller.dart';
 import 'join/join_state.dart';
 import 'location/battery_info_provider.dart';
@@ -209,6 +211,88 @@ final coverageControllerProvider =
       );
       return controller;
     });
+
+/// How often the team layer re-fetches teammates' paths.
+///
+/// Overridable, and set to null in widget tests: a `Timer.periodic` that
+/// outlives a pump trips the test binding's pending-timer assertion (the
+/// same hazard as [mapTilesEnabledProvider]'s tile loads, HANDOVER gotcha
+/// #10). Null means "fetch once, never poll", which is also a legitimate
+/// production configuration for a device being nursed through low battery.
+///
+/// 20s is a deliberate compromise: teammates move at walking pace, so a
+/// faster poll would spend radio and battery re-drawing lines that have
+/// barely changed, and the requests are deltas rather than full snapshots.
+final teamTracksPollIntervalProvider = Provider<Duration?>(
+  (ref) => const Duration(seconds: 20),
+);
+
+/// The team's scan paths, polled while the map is on screen.
+///
+/// Refreshes on the same signal as [coverageControllerProvider] -- a
+/// completed ingest sync -- plus its own slow timer. The sync signal alone
+/// is not enough here: this device uploading ITS points says nothing about
+/// whether a teammate has moved, and the team layer would freeze whenever
+/// this searcher stood still. `autoDispose` stops the timer when the map is
+/// gone, which matters on a battery this app spends the rest of its effort
+/// conserving.
+final teamTracksControllerProvider =
+    StateNotifierProvider.autoDispose<TeamTracksController, TeamTracksState>((
+      ref,
+    ) {
+      final controller = TeamTracksController(
+        api: ref.watch(apiClientProvider),
+        storage: ref.watch(secureStorageManagerProvider),
+      );
+      unawaited(controller.reload());
+
+      final interval = ref.watch(teamTracksPollIntervalProvider);
+      if (interval != null) {
+        final timer = Timer.periodic(
+          interval,
+          (_) => unawaited(controller.refresh()),
+        );
+        ref.onDispose(timer.cancel);
+      }
+
+      ref.listen<DateTime?>(
+        ingestSyncControllerProvider.select(
+          (sync) => sync is SyncActive ? sync.lastSyncAt : null,
+        ),
+        (previous, next) {
+          if (next != null && next != previous) {
+            unawaited(controller.refresh());
+          }
+        },
+      );
+      return controller;
+    });
+
+/// What this user may do in their current sector, per the BACKEND.
+///
+/// Drives whether alert-moderation controls are offered at all. Falls back
+/// to [SectorPermissions.none] -- no elevated rights -- on any failure,
+/// because the failure mode of guessing high (offering an Acknowledge
+/// button that the server will refuse) is a searcher who believes an
+/// emergency has been picked up when it has not.
+final sectorPermissionsProvider = FutureProvider<SectorPermissions>((
+  ref,
+) async {
+  final storage = ref.watch(secureStorageManagerProvider);
+  final session = await storage.loadSession();
+  final account = await storage.loadAccount();
+  if (session == null || account == null) return SectorPermissions.none;
+  try {
+    return await ref
+        .watch(apiClientProvider)
+        .getSectorPermissions(
+          accountToken: account.accessToken,
+          sectorId: session.sectorId,
+        );
+  } on Exception {
+    return SectorPermissions.none;
+  }
+});
 
 // --- SOS (Phase 6) -------------------------------------------------------
 

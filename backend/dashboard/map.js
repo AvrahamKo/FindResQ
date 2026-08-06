@@ -252,6 +252,19 @@ export class TacticalMap {
     }
   }
 
+  /// Drops a deleted alert's marker. Separate from `applySos`, which
+  /// reconciles against a delta of rows that still exist -- a deleted alert
+  /// appears in no delta, ever, so nothing would otherwise remove its pin
+  /// and it would sit on the map until a full page reload.
+  removeSos(sectorId, alertId) {
+    const layers = this.sectors.get(sectorId);
+    if (!layers) return;
+    const marker = layers.sosMarkers.get(alertId);
+    if (!marker) return;
+    this.map.removeLayer(marker);
+    layers.sosMarkers.delete(alertId);
+  }
+
   applyReports(sectorId, reports) {
     const layers = this.sectors.get(sectorId);
     if (!layers) return;

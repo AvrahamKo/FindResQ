@@ -42,3 +42,29 @@ async def require_lead_or_commander(
     return swe
 
 
+async def require_alert_moderator(
+    conn: asyncpg.Connection, sector_id: uuid.UUID, user: User
+) -> sectors_repo.SectorWithEvent:
+    """Gate for acting on an alert: acknowledge, resolve, or clear.
+
+    Same two roles as `require_lead_or_commander` -- the sector's Lead (the
+    Sector Manager) and the event's Commander -- but named for the decision
+    it guards rather than for the roles that happen to satisfy it today.
+    Acknowledging an SOS is a claim that command has SEEN it and is acting;
+    a rank-and-file searcher tapping it silences the alarm for the whole
+    team while nobody has actually taken responsibility, which is the
+    failure this separation exists to prevent. Distinguishing that from
+    ordinary sector administration means the two can be given different
+    answers later without hunting for which call sites meant which.
+    """
+    swe = await sectors_repo.get_with_event(conn, sector_id)
+    if swe is None:
+        raise NotFound("sector not found")
+    if not (swe.event_commander_id == user.id or swe.sector.lead_user_id == user.id):
+        raise Forbidden(
+            "only this sector's manager (lead) or the event's commander "
+            "can acknowledge or clear alerts"
+        )
+    return swe
+
+

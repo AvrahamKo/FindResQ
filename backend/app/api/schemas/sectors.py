@@ -89,3 +89,23 @@ class SectorOut(BaseModel):
 
 class SectorLeadAssign(BaseModel):
     user_id: uuid.UUID
+
+
+class SectorPermissionsOut(BaseModel):
+    """The caller's own capabilities in one sector, for UI gating only.
+
+    Every flag is derived server-side from the same checks the protected
+    routes run, so a client never has to encode "who may acknowledge an
+    alert" for itself -- and cannot drift from the answer the server will
+    actually give.
+    """
+
+    sector_id: uuid.UUID
+    role: Literal["commander", "lead", "volunteer"]
+    is_commander: bool
+    is_sector_manager: bool = Field(
+        description="True if the caller is this sector's Lead (Sector Manager)."
+    )
+    can_acknowledge_alerts: bool
+    can_delete_alerts: bool
+    can_moderate_members: bool

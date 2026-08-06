@@ -210,6 +210,109 @@ async def insert_point(
     return row is not None
 
 
+@dataclass(frozen=True, slots=True)
+class TeamTrack:
+    """One searcher's continuous traverse, as a simplified polyline."""
+
+    segment_id: uuid.UUID
+    user_id: uuid.UUID
+    device_id: uuid.UUID
+    movement_mode: str
+    started_at: datetime
+    ended_at: datetime | None
+    is_valid: bool
+    point_count: int
+    # [(lat, lng), ...] in recorded order.
+    points: list[tuple[float, float]]
+
+
+# A closed segment caches `path`; a live one does not (see close_segment).
+# Rather than branch, this reads points for both -- correctness over a micro-
+# optimisation, since the live segments are exactly the ones a searcher in
+# the field most needs to see moving.
+#
+# ST_Simplify runs in DEGREES because the geometry is WGS84 lon/lat. 1e-5 deg
+# is ~1.1 m at the equator and less with latitude -- below the accuracy of
+# any consumer GPS fix, so the rendered line is visually identical while the
+# payload over a field LTE link drops by an order of magnitude on a long
+# traverse. It is applied for TRANSPORT ONLY: coverage POD is computed from
+# `hex_contributions`, never from this, so simplification here cannot move a
+# hex or change anyone's search credit.
+_TRACK_SIMPLIFY_DEGREES = 0.00001
+
+
+async def get_team_tracks(
+    conn: asyncpg.Connection,
+    sector_id: uuid.UUID,
+    *,
+    since: datetime | None = None,
+    limit: int = 200,
+) -> list[TeamTrack]:
+    """Every searcher's path in one sector -- the whole team, not one device.
+
+    `since` filters on the segment's LAST point, not its first: an open
+    segment started an hour ago but extended ten seconds ago is exactly what
+    a polling client needs to receive again, and filtering on `started_at`
+    would silently freeze every long traverse on the map at the position it
+    held when the client first saw it.
+
+    Invalid segments (plausibility-flagged, or retracted by a Commander) are
+    excluded: they contribute nothing to coverage, so drawing them would
+    show teammates ground that the POD map does not consider searched.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT s.id AS segment_id, s.user_id, s.device_id, s.movement_mode,
+               s.started_at, s.ended_at, s.is_valid, s.point_count,
+               ST_AsGeoJSON(
+                   ST_Simplify(
+                       ST_MakeLine(p.geom::geometry ORDER BY p.recorded_at, p.id),
+                       $4
+                   )
+               )::json AS line
+        FROM track_segments s
+        JOIN track_points p ON p.segment_id = s.id
+        WHERE s.sector_id = $1
+          AND s.is_valid
+          AND ($2::timestamptz IS NULL OR s.last_recorded_at > $2)
+        GROUP BY s.id
+        HAVING count(p.id) >= 2
+        ORDER BY s.started_at DESC
+        LIMIT $3
+        """,
+        sector_id,
+        since,
+        limit,
+        _TRACK_SIMPLIFY_DEGREES,
+    )
+
+    tracks: list[TeamTrack] = []
+    for row in rows:
+        line = row["line"]
+        if isinstance(line, str):
+            line = json.loads(line)
+        if not line or line.get("type") != "LineString":
+            # ST_MakeLine over collinear duplicates can degenerate to a
+            # Point despite the >= 2 row guard. Nothing to draw.
+            continue
+        tracks.append(
+            TeamTrack(
+                segment_id=row["segment_id"],
+                user_id=row["user_id"],
+                device_id=row["device_id"],
+                movement_mode=row["movement_mode"],
+                started_at=row["started_at"],
+                ended_at=row["ended_at"],
+                is_valid=row["is_valid"],
+                point_count=row["point_count"],
+                # GeoJSON is [lng, lat]; every map widget in this project
+                # wants (lat, lng). Swapped once, here.
+                points=[(coord[1], coord[0]) for coord in line["coordinates"]],
+            )
+        )
+    return tracks
+
+
 async def buffer_wkt_to_geojson(
     conn: asyncpg.Connection, wkt: str, radius_m: float
 ) -> dict:

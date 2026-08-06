@@ -209,6 +209,36 @@ async def set_status(
     return _to_sector(row) if row else None
 
 
+async def clear_lead_for_user(
+    conn: asyncpg.Connection, event_id: uuid.UUID, user_id: uuid.UUID
+) -> int:
+    """Vacates any sector in this event that `user_id` currently leads.
+    Returns how many sectors were affected.
+
+    `sectors.lead_user_id` is a second, independent pointer at the same
+    person as their `sector_memberships.role = 'lead'` row, and
+    `require_lead_or_commander` reads the sectors one. Revoking the
+    membership alone would therefore leave a removed user still passing
+    every Lead authorization check on the sector they used to run.
+
+    The sector is left with no Lead rather than guessing a successor: the
+    Commander can act anywhere in their event (Branch B), so the sector is
+    never unmanageable, and picking a replacement is a command decision.
+    """
+    return await conn.fetchval(
+        """
+        WITH cleared AS (
+            UPDATE sectors SET lead_user_id = NULL
+            WHERE event_id = $1 AND lead_user_id = $2
+            RETURNING id
+        )
+        SELECT count(*) FROM cleared
+        """,
+        event_id,
+        user_id,
+    )
+
+
 async def close_all_for_event(conn: asyncpg.Connection, event_id: uuid.UUID) -> None:
     """Event teardown: no sector in an ended event should accept new joins."""
     await conn.execute(

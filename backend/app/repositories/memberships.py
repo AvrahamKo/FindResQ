@@ -43,7 +43,17 @@ def _to_membership(row: asyncpg.Record) -> Membership:
     return Membership(**dict(row))
 
 
-async def create_pending(
+# A membership in one of these statuses is over: the volunteer was turned
+# down, removed, or swept up by event teardown. None of them is a reason to
+# refuse a NEW request -- see create_or_reopen_pending.
+TERMINAL_STATUSES = ("rejected", "revoked", "ended")
+
+# The complement: a row in one of these represents a request that is still
+# live, and a second one would be a genuine duplicate.
+LIVE_STATUSES = ("pending", "approved")
+
+
+async def create_or_reopen_pending(
     conn: asyncpg.Connection,
     *,
     sector_id: uuid.UUID,
@@ -52,10 +62,32 @@ async def create_pending(
     movement_mode: str,
     battery_at_join: int,
     powerbank_attested: bool,
-) -> Membership:
-    """UNIQUE(sector_id, device_id) makes re-joining with the same device
-    idempotent-ish: a second attempt raises UniqueViolationError, which the
-    route layer turns into "you already have a request for this sector"."""
+) -> Membership | None:
+    """Creates a pending request, or REOPENS a terminal one for the same
+    (sector, device). Returns None if a live request already exists.
+
+    UNIQUE(sector_id, device_id) is the right invariant -- one row per device
+    per sector -- but a plain INSERT against it meant a rejection was
+    permanent: the leftover 'rejected' row collided with every future
+    attempt, so a volunteer turned away once (a mis-tap by a Lead, a wrong
+    movement mode, a removal that was later reconsidered) could never ask
+    again, from that handset, for the rest of the callout. That is the exact
+    opposite of what a rejection should mean in a search where people arrive,
+    leave and come back.
+
+    So the conflict is resolved rather than raised, and the reopened row is
+    reset to a genuinely fresh request: the previous approval trail
+    (`approved_by`/`approved_at`/`revoked_at`), the issued key epoch and the
+    old session window are all cleared, so nothing from the previous
+    membership can be mistaken for a current grant. `role` resets to
+    'volunteer' too -- a re-applying ex-Lead is re-approved as a volunteer
+    and re-promoted deliberately, never silently.
+
+    The `WHERE ... status = ANY(TERMINAL)` guard on the DO UPDATE is what
+    keeps this from being a way to overwrite a LIVE request: a pending or
+    approved row makes the upsert match nothing and return no row, which the
+    route turns into the same 409 as before.
+    """
     row = await conn.fetchrow(
         f"""
         INSERT INTO sector_memberships (
@@ -63,6 +95,20 @@ async def create_pending(
             battery_at_join, powerbank_attested
         )
         VALUES ($1, $2, $3, 'volunteer', $4, $5, $6)
+        ON CONFLICT (sector_id, device_id) DO UPDATE SET
+            user_id            = EXCLUDED.user_id,
+            role               = 'volunteer',
+            movement_mode      = EXCLUDED.movement_mode,
+            battery_at_join    = EXCLUDED.battery_at_join,
+            powerbank_attested = EXCLUDED.powerbank_attested,
+            status             = 'pending',
+            key_epoch_issued   = NULL,
+            approved_by        = NULL,
+            approved_at        = NULL,
+            revoked_at         = NULL,
+            session_expires_at = NULL,
+            created_at         = now()
+        WHERE sector_memberships.status = ANY($7::text[])
         RETURNING {_COLUMNS}
         """,
         sector_id,
@@ -71,8 +117,9 @@ async def create_pending(
         movement_mode,
         battery_at_join,
         powerbank_attested,
+        list(TERMINAL_STATUSES),
     )
-    return _to_membership(row)
+    return _to_membership(row) if row else None
 
 
 async def get(conn: asyncpg.Connection, membership_id: uuid.UUID) -> Membership | None:
@@ -220,19 +267,100 @@ async def set_key_epoch(
     )
 
 
+# Statuses that still grant READ access to an event/sector's data.
+#
+# 'approved' is the obvious one. 'ended' is included because event teardown
+# sweeps every approved membership to 'ended' (see end_all_for_event), and a
+# searcher who worked a callout should not lose the ability to look back at
+# the sector they searched the moment the Commander closes it.
+#
+# Conspicuously absent: 'pending' (never approved -- nothing has been granted
+# yet), 'rejected' and 'revoked'. Those last two are the whole point of
+# removing someone: a revoked volunteer must lose visibility of the event's
+# live data on their very next request, not merely lose the ability to write
+# to it.
+VISIBILITY_STATUSES = ("approved", "ended")
+
+
 async def user_has_membership_in_event(
     conn: asyncpg.Connection, event_id: uuid.UUID, user_id: uuid.UUID
 ) -> bool:
+    """Whether the user still has any access-granting membership in the event.
+
+    Deliberately status-filtered. This gates `GET /events/{id}`, the sector
+    list, and the WebSocket ticket, so a status-blind check here would leave
+    a removed volunteer able to keep watching the event they were removed
+    from -- which is precisely the access that revocation is supposed to end.
+    """
     return await conn.fetchval(
         """
         SELECT EXISTS (
             SELECT 1 FROM sector_memberships m
             JOIN sectors s ON s.id = m.sector_id
             WHERE s.event_id = $1 AND m.user_id = $2
+              AND m.status = ANY($3::text[])
         )
         """,
         event_id,
         user_id,
+        list(VISIBILITY_STATUSES),
+    )
+
+
+async def list_for_event_user(
+    conn: asyncpg.Connection, event_id: uuid.UUID, user_id: uuid.UUID
+) -> list[Membership]:
+    """Every membership this user holds anywhere in the event, any status --
+    a user may be in several sectors, and removing them from the event has
+    to reach all of them, not just the one the Commander happened to be
+    looking at."""
+    rows = await conn.fetch(
+        f"""
+        SELECT {_COLUMNS} FROM sector_memberships m
+        WHERE m.user_id = $2
+          AND m.sector_id IN (SELECT id FROM sectors WHERE event_id = $1)
+        ORDER BY m.created_at
+        """,
+        event_id,
+        user_id,
+    )
+    return [_to_membership(row) for row in rows]
+
+
+async def revoke_all_for_user_in_event(
+    conn: asyncpg.Connection, event_id: uuid.UUID, user_id: uuid.UUID
+) -> int:
+    """Removes a user from an entire event in one statement. Returns the
+    number of memberships actually ended.
+
+    The row is UPDATEd, never DELETEd. `track_segments`, `track_points`,
+    `hex_contributions`, `reports` and `sos_alerts` all reference
+    `users(id)`, and the coverage map's core question -- "who covered this
+    hex, and when?" -- must stay answerable about someone who was removed.
+    Removal ends access; it does not rewrite the search record.
+
+    `session_expires_at = now()` is belt-and-braces alongside the status
+    flip: `current_membership` (api/deps.py) rejects on either, so a session
+    token stops working on its very next request even if some future code
+    path learns to tolerate a non-'approved' status.
+    """
+    return await conn.fetchval(
+        """
+        WITH revoked AS (
+            UPDATE sector_memberships m
+            SET status = 'revoked', revoked_at = now(), session_expires_at = now()
+            FROM sectors s
+            WHERE m.sector_id = s.id
+              AND s.event_id = $1
+              AND m.user_id = $2
+              AND m.status = ANY($3::text[])
+            RETURNING m.id
+        )
+        SELECT count(*) FROM revoked
+        """,
+        event_id,
+        user_id,
+        list(LIVE_STATUSES),
     )
 
 

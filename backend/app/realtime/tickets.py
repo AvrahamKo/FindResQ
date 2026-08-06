@@ -55,6 +55,38 @@ class TicketStore:
             return None
         return ticket.user_id
 
+    def purge_event(self, event_id: uuid.UUID) -> int:
+        """Drops every outstanding ticket for one event. Returns how many.
+
+        Tickets live at most 30 seconds, so this is not what makes a deleted
+        event unreachable -- `_get_visible_event` already 404s once the row
+        is gone, and that is the real gate. What this closes is the window
+        where a ticket minted a moment BEFORE the delete could still be
+        redeemed a moment after it, opening a socket onto an event that no
+        longer exists: harmless data-wise, but it would immediately be
+        stranded in `_connections` with no listener able to reach it.
+        """
+        stale = [t for t, ticket in self._tickets.items() if ticket.event_id == event_id]
+        for t in stale:
+            del self._tickets[t]
+        return len(stale)
+
+    def purge_user(self, user_id: uuid.UUID, event_id: uuid.UUID | None = None) -> int:
+        """Drops a user's outstanding tickets, optionally scoped to one event.
+
+        The companion to `ConnectionManager.disconnect_user`: hanging up a
+        revoked user's socket accomplishes nothing if they still hold a
+        valid, unredeemed ticket to open a fresh one.
+        """
+        stale = [
+            t
+            for t, ticket in self._tickets.items()
+            if ticket.user_id == user_id and (event_id is None or ticket.event_id == event_id)
+        ]
+        for t in stale:
+            del self._tickets[t]
+        return len(stale)
+
     def _evict_expired(self) -> None:
         now = datetime.now(timezone.utc)
         expired = [t for t, ticket in self._tickets.items() if ticket.expires_at <= now]

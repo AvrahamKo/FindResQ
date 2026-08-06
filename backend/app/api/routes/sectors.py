@@ -22,6 +22,7 @@ from ..schemas.sectors import (
     SectorCreate,
     SectorLeadAssign,
     SectorOut,
+    SectorPermissionsOut,
     SectorTuningUpdate,
     SectorUpdate,
 )
@@ -83,6 +84,17 @@ async def list_sectors(
 async def _require_sector_visibility(
     conn: ConnDep, sector_id: uuid.UUID, user: CurrentUser
 ) -> sectors_repo.SectorWithEvent:
+    """Read access to a sector's data: coverage, presence, reports, tracks.
+
+    The membership must still GRANT access, not merely exist. A
+    status-blind check here (any row at all, in any state) meant a
+    volunteer who had been rejected -- or revoked, i.e. deliberately removed
+    -- kept full read access to the sector's live coverage, presence and
+    reports for as long as their account token lasted, because the row
+    documenting their removal was itself accepted as proof of belonging.
+    Write paths were never affected (`current_membership` has always
+    re-checked for 'approved'); this closes the read side to match.
+    """
     swe = await sectors_repo.get_with_event(conn, sector_id)
     if swe is None:
         raise NotFound("sector not found")
@@ -90,9 +102,52 @@ async def _require_sector_visibility(
     is_staff = swe.event_commander_id == user.id or swe.sector.lead_user_id == user.id
     if not is_staff:
         membership = await memberships_repo.get_by_user(conn, sector_id, user.id)
-        if membership is None:
+        if membership is None or membership.status not in memberships_repo.VISIBILITY_STATUSES:
             raise Forbidden("you have no role in this sector")
     return swe
+
+
+@router.get("/sectors/{sector_id}/permissions", response_model=SectorPermissionsOut)
+async def get_sector_permissions(
+    sector_id: uuid.UUID, user: CurrentUser, conn: ConnDep
+) -> SectorPermissionsOut:
+    """What the CALLER may do in this sector, decided by the same code that
+    enforces it.
+
+    Exists so a client can hide an action it is not permitted to take,
+    without re-deriving the rule locally. The mobile app previously offered
+    every searcher an "Acknowledge" button on every alert and let the
+    resulting 403 be the explanation -- which reads, in the field, as a
+    broken app rather than a permission boundary, and does so at the worst
+    possible moment.
+
+    This is a convenience for the UI and nothing more. Every protected route
+    still runs its own check; nobody is trusted to have asked this first.
+    """
+    swe = await _require_sector_visibility(conn, sector_id, user)
+    is_commander = swe.event_commander_id == user.id
+    is_lead = swe.sector.lead_user_id == user.id
+
+    if is_commander:
+        role = "commander"
+    elif is_lead:
+        role = "lead"
+    else:
+        role = "volunteer"
+
+    return SectorPermissionsOut(
+        sector_id=sector_id,
+        role=role,
+        is_commander=is_commander,
+        is_sector_manager=is_lead,
+        # Kept as separate flags rather than one "is staff" boolean: they
+        # are answers to different questions, and collapsing them is how a
+        # UI ends up showing a Lead a button only the Commander's endpoint
+        # will accept.
+        can_acknowledge_alerts=is_commander or is_lead,
+        can_delete_alerts=is_commander or is_lead,
+        can_moderate_members=is_commander or is_lead,
+    )
 
 
 @router.get("/sectors/{sector_id}", response_model=SectorOut)

@@ -1,4 +1,5 @@
 import { api } from "./api.js";
+import { confirmEventDeletion } from "./events-view.js";
 import { DashboardSocket } from "./ws.js";
 import { TacticalMap, PRESENCE_COLORS, REPORT_KIND_STYLE } from "./map.js";
 import { showSubjectModal } from "./subject-view.js";
@@ -25,6 +26,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       <button id="start-event-btn" style="display:none">Start Event</button>
       <button class="secondary" id="subject-btn">Subject</button>
       <button class="danger" id="end-event-btn" style="display:none">End Event</button>
+      <button class="danger" id="delete-event-btn" style="display:none">Delete Event</button>
       <span class="dot" id="conn-dot"></span>
       <span id="conn-label" style="font-size:12px;color:var(--text-dim)">connecting…</span>
       <div class="spacer"></div>
@@ -54,7 +56,11 @@ export async function renderDashboard(root, { eventId, onLogout }) {
 
   const map = new TacticalMap("map");
   const sectors = new Map(); // sectorId -> SectorOut
-  const openSos = new Map(); // alertId -> { alert, sectorId }
+  // ALL alerts, not just open ones. Closed alerts used to be dropped on
+  // arrival, which made them unreachable -- and "clear the obsolete alerts"
+  // needs them to be reachable. They are rendered in a separate, quieter
+  // section so keeping them cannot dilute the open list.
+  const sosAlerts = new Map(); // alertId -> { alert, sectorId }
   const pendingReports = new Map(); // reportId -> { report, sectorId }
   const membershipsBySector = new Map(); // sectorId -> MembershipOut[] (all statuses)
   const joinCodes = new Map(); // sectorId -> JoinCodeOut (only ones created THIS session -- see api.js)
@@ -84,6 +90,20 @@ export async function renderDashboard(root, { eventId, onLogout }) {
 
   function isCommander() {
     return !!(me && event && me.id === event.commander_id);
+  }
+
+  /// Whether the logged-in user may acknowledge, resolve or clear alerts in
+  /// this sector. Mirrors the backend's `require_alert_moderator`: the
+  /// event's Commander anywhere, or that specific sector's Lead (the Sector
+  /// Manager) in their own sector -- and nobody else, including a Lead
+  /// looking at a sector they do not run.
+  ///
+  /// The server enforces this regardless; hiding the control here is so a
+  /// user is never offered an action whose only possible outcome is a 403.
+  function canModerateAlerts(sectorId) {
+    if (isCommander()) return true;
+    const sector = sectors.get(sectorId);
+    return !!(me && sector && sector.lead_user_id === me.id);
   }
 
   function inScope(sectorId) {
@@ -380,12 +400,15 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       const removeBtn = document.createElement("button");
       removeBtn.className = "danger";
       removeBtn.textContent = "Remove";
+      removeBtn.title = `Remove from ${sector.name} only`;
       removeBtn.addEventListener("click", async () => {
         if (
           !confirm(
             `Remove ${m.user_id.slice(0, 8)} from ${sector.name}?\n\n` +
-              "Their session stops working on their next request. They keep the " +
-              "sector key until it is re-keyed, and can rejoin with a valid code."
+              "Their session stops working on their next request and any live " +
+              "connection is closed immediately. Their recorded scans are kept.\n\n" +
+              "They keep the sector key until it is re-keyed, and MAY re-apply " +
+              "with a valid join code."
           )
         ) {
           return;
@@ -400,6 +423,55 @@ export async function renderDashboard(root, { eventId, onLogout }) {
         }
       });
       actions.appendChild(removeBtn);
+
+      // Removing someone from the whole event is a separate, stronger
+      // action than removing them from this one sector -- a volunteer
+      // working two sectors is not removed from the callout by being taken
+      // off one of them. Commander-only, matching the backend.
+      const removeFromEventBtn = document.createElement("button");
+      removeFromEventBtn.className = "danger";
+      removeFromEventBtn.textContent = "Remove from event";
+      if (!isCommander()) {
+        removeFromEventBtn.disabled = true;
+        removeFromEventBtn.title = "Only the event commander can remove a user from the event";
+      } else {
+        removeFromEventBtn.addEventListener("click", async () => {
+          if (
+            !confirm(
+              `Remove ${m.user_id.slice(0, 8)} from the ENTIRE event?\n\n` +
+                "• Every membership they hold, in every sector, is revoked\n" +
+                "• Any Sector Lead role they hold is vacated\n" +
+                "• Their sessions stop working immediately and any live " +
+                "connection is closed\n\n" +
+                "Their recorded scan history is KEPT and stays credited to " +
+                "them — the coverage map still shows the ground they searched."
+            )
+          ) {
+            return;
+          }
+          removeFromEventBtn.disabled = true;
+          try {
+            const result = await api.removeEventMember(eventId, m.user_id);
+            // Several sectors and possibly a lead pointer changed, so
+            // refetch rather than patching local state.
+            const refreshed = await api.listSectors(eventId).catch(() => []);
+            for (const s of refreshed) sectors.set(s.id, s);
+            await Promise.all([...sectors.keys()].map(refreshMemberships));
+            renderSectorList();
+            renderRightPanel();
+            if (result.lead_roles_cleared > 0) {
+              alert(
+                `${result.lead_roles_cleared} sector(s) now have no Lead — ` +
+                  "assign a replacement.",
+              );
+            }
+          } catch (e) {
+            showError(e);
+            removeFromEventBtn.disabled = false;
+          }
+        });
+      }
+      actions.appendChild(removeFromEventBtn);
 
       el.appendChild(card);
     }
@@ -471,56 +543,142 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     }
   }
 
+  const OPEN_SOS_STATUSES = new Set(["active", "acknowledged"]);
+
   function renderSosList() {
     const el = root.querySelector("#sos-list");
     if (!el) return;
-    const items = [...openSos.values()]
-      .filter((e) => inScope(e.sectorId))
-      .sort((a, b) => new Date(b.alert.triggered_at) - new Date(a.alert.triggered_at));
 
-    if (items.length === 0) {
-      el.innerHTML = '<div class="empty-hint">No open alerts.</div>';
-      return;
-    }
+    const inView = [...sosAlerts.values()].filter((e) => inScope(e.sectorId));
+    const byNewest = (a, b) =>
+      new Date(b.alert.triggered_at) - new Date(a.alert.triggered_at);
+    const open = inView.filter((e) => OPEN_SOS_STATUSES.has(e.alert.status)).sort(byNewest);
+    const closed = inView.filter((e) => !OPEN_SOS_STATUSES.has(e.alert.status)).sort(byNewest);
+
     el.innerHTML = "";
-    for (const { alert: sosAlert, sectorId } of items) {
-      const card = document.createElement("div");
-      card.className = "alert-card sos";
-      card.innerHTML = `
-        <div><strong>SOS</strong>${selectedSectorId ? "" : ` · ${escapeHtml(sectorName(sectorId))}`}</div>
-        <div class="meta">${sosAlert.status} · ${new Date(sosAlert.triggered_at).toLocaleTimeString()}</div>
-        <div class="actions"></div>
-      `;
-      const actions = card.querySelector(".actions");
-      if (sosAlert.status === "active") {
-        const ackBtn = document.createElement("button");
-        ackBtn.textContent = "Acknowledge";
-        ackBtn.addEventListener("click", async () => {
-          ackBtn.disabled = true;
-          try {
-            await api.acknowledgeSos(sosAlert.id);
-          } catch (e) {
-            showError(e);
-            ackBtn.disabled = false;
-          }
-        });
-        actions.appendChild(ackBtn);
-      }
-      const resolveBtn = document.createElement("button");
-      resolveBtn.className = "secondary";
-      resolveBtn.textContent = "Resolve";
-      resolveBtn.addEventListener("click", async () => {
-        resolveBtn.disabled = true;
-        try {
-          await api.resolveSos(sosAlert.id);
-        } catch (e) {
-          showError(e);
-          resolveBtn.disabled = false;
-        }
-      });
-      actions.appendChild(resolveBtn);
-      el.appendChild(card);
+
+    if (open.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-hint";
+      empty.textContent = "No open alerts.";
+      el.appendChild(empty);
     }
+    for (const entry of open) el.appendChild(buildSosCard(entry, { closed: false }));
+
+    if (closed.length === 0) return;
+
+    // Closed alerts get a heading of their own so a resolved alarm can never
+    // be mistaken at a glance for a live one on a busy screen.
+    const heading = document.createElement("div");
+    heading.className = "panel-hint";
+    heading.textContent = `Closed (${closed.length})`;
+    el.appendChild(heading);
+
+    for (const entry of closed) el.appendChild(buildSosCard(entry, { closed: true }));
+
+    // One button for the common case: a list cluttered with alerts that are
+    // all long over. Open alerts are excluded server-side, not merely
+    // omitted from this count, so this cannot silence a live alarm.
+    const clearableSectors = new Set(
+      closed.filter((e) => canModerateAlerts(e.sectorId)).map((e) => e.sectorId)
+    );
+    if (clearableSectors.size === 0) return;
+
+    const clearAll = document.createElement("button");
+    clearAll.className = "danger";
+    clearAll.textContent = `Clear ${closed.length} closed alert(s)`;
+    clearAll.addEventListener("click", async () => {
+      if (
+        !confirm(
+          `Permanently delete ${closed.length} closed alert(s)?\n\n` +
+            "Open and acknowledged alerts are never affected.\n" +
+            "This cannot be undone.",
+        )
+      ) {
+        return;
+      }
+      clearAll.disabled = true;
+      try {
+        // Per sector, because the endpoint is sector-scoped -- in the
+        // event-wide overview this can legitimately span several.
+        await Promise.all([...clearableSectors].map((id) => api.clearClosedSos(id)));
+        // The `sos_deleted` socket messages remove the cards; this is only
+        // a fallback for a dropped socket.
+        for (const entry of closed) sosAlerts.delete(entry.alert.id);
+        renderSosList();
+      } catch (e) {
+        showError(e);
+        clearAll.disabled = false;
+      }
+    });
+    el.appendChild(clearAll);
+  }
+
+  function buildSosCard({ alert: sosAlert, sectorId }, { closed }) {
+    const card = document.createElement("div");
+    card.className = `alert-card sos${closed ? " closed" : ""}`;
+    card.innerHTML = `
+      <div><strong>SOS</strong>${selectedSectorId ? "" : ` · ${escapeHtml(sectorName(sectorId))}`}</div>
+      <div class="meta">${sosAlert.status} · ${new Date(sosAlert.triggered_at).toLocaleTimeString()}</div>
+      <div class="actions"></div>
+    `;
+    const actions = card.querySelector(".actions");
+    const mayModerate = canModerateAlerts(sectorId);
+
+    if (!mayModerate) {
+      // Visible, but read-only. A searcher or a Lead from another sector can
+      // SEE that an alert exists -- situational awareness -- without being
+      // able to acknowledge it on someone else's behalf.
+      const note = document.createElement("span");
+      note.className = "panel-hint";
+      note.textContent = "Sector manager or commander only";
+      actions.appendChild(note);
+      return card;
+    }
+
+    if (sosAlert.status === "active") {
+      actions.appendChild(
+        actionButton("Acknowledge", "", () => api.acknowledgeSos(sosAlert.id))
+      );
+    }
+    if (OPEN_SOS_STATUSES.has(sosAlert.status)) {
+      actions.appendChild(
+        actionButton("Resolve", "secondary", () => api.resolveSos(sosAlert.id))
+      );
+    } else {
+      // Clearing is offered ONLY on an alert that is already over. The
+      // backend refuses to delete an open one outright -- deletion must
+      // never become the quick way to make a live alarm go away.
+      actions.appendChild(
+        actionButton("Clear", "danger", async () => {
+          await api.deleteSos(sosAlert.id);
+          sosAlerts.delete(sosAlert.id);
+          map.removeSos(sectorId, sosAlert.id);
+          renderSosList();
+        })
+      );
+    }
+    return card;
+  }
+
+  /// A button that disables itself while its action is in flight and
+  /// re-enables on failure. The success path deliberately does NOT
+  /// re-enable: either the socket update re-renders the list, or the
+  /// handler did it itself.
+  function actionButton(label, className, action) {
+    const btn = document.createElement("button");
+    if (className) btn.className = className;
+    btn.textContent = label;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await action();
+      } catch (e) {
+        showError(e);
+        btn.disabled = false;
+      }
+    });
+    return btn;
   }
 
   function renderReportList() {
@@ -562,14 +720,19 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   // ---------- state updates ----------
 
   function applySosUpdate(sectorId, alerts) {
-    for (const a of alerts) {
-      if (a.status === "active" || a.status === "acknowledged") {
-        openSos.set(a.id, { alert: a, sectorId });
-      } else {
-        openSos.delete(a.id);
-      }
-    }
+    // Every alert is retained, whatever its status -- a closed one is still
+    // a row a commander may want to clear. `renderSosList` splits them.
+    for (const a of alerts) sosAlerts.set(a.id, { alert: a, sectorId });
     map.applySos(sectorId, alerts);
+    renderSosList();
+  }
+
+  /// An alert was permanently deleted, here or on another dashboard. There
+  /// is no delta row to reconcile against -- the row is gone -- so the
+  /// server sends the id and this drops it.
+  function applySosDeletion(sectorId, alertId) {
+    sosAlerts.delete(alertId);
+    map.removeSos(sectorId, alertId);
     renderSosList();
   }
 
@@ -683,6 +846,50 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     endBtn.style.display = canEnd ? "" : "none";
     endBtn.disabled = false;
     endBtn.onclick = () => confirmAndEndEvent(endBtn);
+
+    // Deletion stays available even after an event has ended -- clearing out
+    // a finished callout is the most common reason to reach for it.
+    const deleteBtn = root.querySelector("#delete-event-btn");
+    deleteBtn.style.display = isCommander() ? "" : "none";
+    deleteBtn.disabled = false;
+    deleteBtn.onclick = () => confirmAndDeleteEvent(deleteBtn);
+  }
+
+  async function confirmAndDeleteEvent(deleteBtn) {
+    if (!confirmEventDeletion(event.name)) return;
+
+    // A second, typed confirmation. This is the only irreversible,
+    // total-destruction action in the product, and it sits in the same top
+    // bar as "End Event" -- one misplaced click on a tired night should not
+    // be able to erase a callout's entire search record.
+    const typed = prompt(
+      `To confirm deletion, type the event name exactly:\n\n${event.name}`,
+    );
+    if (typed === null) return;
+    if (typed.trim() !== event.name) {
+      alert("Name did not match — nothing was deleted.");
+      return;
+    }
+
+    deleteBtn.disabled = true;
+    try {
+      const result = await api.deleteEvent(eventId);
+      socket.stop();
+      clearInterval(membershipPoll);
+      alert(
+        `"${event.name}" deleted.\n\n` +
+          `${result.sectors_deleted} sector(s), ` +
+          `${result.memberships_deleted} membership(s), ` +
+          `${result.track_points_deleted} track point(s), ` +
+          `${result.hex_contributions_deleted} coverage contribution(s), ` +
+          `${result.reports_deleted} report(s) and ` +
+          `${result.sos_alerts_deleted} alert(s) were removed.`,
+      );
+      location.hash = "#/events";
+    } catch (e) {
+      showError(e);
+      deleteBtn.disabled = false;
+    }
   }
 
   async function confirmAndEndEvent(endBtn) {
@@ -879,8 +1086,25 @@ export async function renderDashboard(root, { eventId, onLogout }) {
         case "sos_delta":
           applySosUpdate(msg.sector_id, msg.alerts);
           break;
+        case "sos_deleted":
+          applySosDeletion(msg.sector_id, msg.alert_id);
+          break;
         case "report_delta":
           applyReportUpdate(msg.sector_id, msg.reports);
+          break;
+        case "event_deleted":
+          // Someone (possibly this commander in another tab) destroyed the
+          // event. Everything on screen now describes rows that no longer
+          // exist, so leave rather than degrade into a wall of 404s.
+          alert("This event has been deleted.");
+          location.hash = "#/events";
+          break;
+        case "access_revoked":
+          // This user was removed from the event. The socket is already
+          // being closed server-side; say why, since an unexplained
+          // disconnect is indistinguishable from a flaky link.
+          alert("Your access to this event has been revoked.");
+          location.hash = "#/events";
           break;
       }
     },

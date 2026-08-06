@@ -44,9 +44,51 @@ Map<String, dynamic> _alertJson() => {
   'updated_at': '2030-01-01T00:00:00Z',
 };
 
+/// A sector-permissions body. Defaults to a plain field searcher, which is
+/// the case the alert-moderation gating actually has to get right.
+Map<String, dynamic> _permissionsJson({
+  String role = 'volunteer',
+  bool canModerate = false,
+}) => {
+  'sector_id': 's1',
+  'role': role,
+  'is_commander': role == 'commander',
+  'is_sector_manager': role == 'lead',
+  'can_acknowledge_alerts': canModerate,
+  'can_delete_alerts': canModerate,
+  'can_moderate_members': canModerate,
+};
+
+Map<String, dynamic> _trackJson({
+  String segmentId = 'seg-1',
+  String userId = 'teammate-1',
+  String? endedAt,
+  List<List<double>>? points,
+}) => {
+  'segment_id': segmentId,
+  'user_id': userId,
+  'device_id': 'device-$userId',
+  'movement_mode': 'walker',
+  'started_at': '2030-01-01T00:00:00Z',
+  'ended_at': endedAt,
+  'point_count': 3,
+  // [lat, lng] -- already swapped server-side.
+  'points': points ??
+      [
+        [31.710, 35.205],
+        [31.712, 35.207],
+        [31.714, 35.209],
+      ],
+};
+
 void main() {
   late ProviderContainer container;
   late List<String> requestedPaths;
+  // Reassignable per test, so a test can put the signed-in user in a
+  // different role or give the sector some teammates without rebuilding the
+  // whole mock client.
+  late List<Map<String, dynamic>> teamTracks;
+  late Map<String, dynamic> permissionsJson;
 
   // The tile layer is disabled throughout: TileLayer issues real HTTP per
   // tile and leaves image-load timers pending, which trips the test
@@ -62,9 +104,16 @@ void main() {
 
   setUp(() async {
     requestedPaths = [];
+    teamTracks = [];
+    permissionsJson = _permissionsJson();
     container = ProviderContainer(
       overrides: [
         mapTilesEnabledProvider.overrideWithValue(false),
+        // No background polling in widget tests: a live Timer.periodic
+        // outlives the pump and trips the binding's pending-timer
+        // assertion. The one-shot initial fetch still runs, so the team
+        // layer is exercised exactly as in the field.
+        teamTracksPollIntervalProvider.overrideWithValue(null),
         keyValueStoreProvider.overrideWith((ref) => InMemoryKeyValueStore()),
         locationSourceProvider.overrideWithValue(FakeLocationSource()),
         batteryInfoProvider.overrideWithValue(
@@ -93,6 +142,19 @@ void main() {
             httpClient: MockClient((request) async {
               requestedPaths.add(request.url.path);
               if (request.url.path == '/sos') return _json(_alertJson(), 201);
+              // Both of these must be matched BEFORE the catch-all
+              // `/sectors/` boundary handler below, which would otherwise
+              // answer them with a SectorOut body.
+              if (request.url.path == '/sectors/s1/tracks') {
+                return _json({
+                  'sector_id': 's1',
+                  'tracks': teamTracks,
+                  'server_time': '2030-01-01T00:00:00Z',
+                }, 200);
+              }
+              if (request.url.path == '/sectors/s1/permissions') {
+                return _json(permissionsJson, 200);
+              }
               if (request.url.path == '/sectors/s1/hexes') {
                 return _json({
                   'sector_id': 's1',
@@ -336,5 +398,104 @@ void main() {
     expect(find.byKey(const Key('last_server_sync')), findsOneWidget);
     expect(find.textContaining('Last sync:'), findsOneWidget);
     expect(find.text('Last sync: never'), findsNothing);
+  });
+
+  group('team scan paths', () {
+    testWidgets('the Team layer shows EVERY teammate, not just this device', (
+      tester,
+    ) async {
+      // The bug: switching to "Team" used to render only the local personal
+      // trail, so a searcher saw their own line twice and never a
+      // teammate's.
+      teamTracks = [
+        _trackJson(segmentId: 'seg-a', userId: 'alice'),
+        _trackJson(segmentId: 'seg-b', userId: 'bob', endedAt: '2030-01-01T01:00:00Z'),
+        _trackJson(segmentId: 'seg-c', userId: 'u1'),
+      ];
+
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      expect(requestedPaths.contains('/sectors/s1/tracks'), isTrue);
+      final map = tester.widget<SectorMapView>(find.byType(SectorMapView));
+      expect(map.coverageLayer, SearchCoverageLayer.team);
+      expect(
+        map.teamTracks.map((t) => t.userId).toSet(),
+        {'alice', 'bob', 'u1'},
+      );
+      // A still-moving searcher is distinguishable from a finished traverse.
+      expect(map.teamTracks.firstWhere((t) => t.userId == 'alice').isLive, isTrue);
+      expect(map.teamTracks.firstWhere((t) => t.userId == 'bob').isLive, isFalse);
+    });
+
+    testWidgets('team paths carry (lat, lng), not transposed coordinates', (
+      tester,
+    ) async {
+      teamTracks = [
+        _trackJson(
+          points: [
+            [31.715, 35.208],
+            [31.717, 35.209],
+          ],
+        ),
+      ];
+
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      final map = tester.widget<SectorMapView>(find.byType(SectorMapView));
+      final first = map.teamTracks.single.points.first;
+      expect(first.latitude, 31.715);
+      expect(first.longitude, 35.208);
+    });
+
+    testWidgets('the Mine layer drops the team paths entirely', (tester) async {
+      teamTracks = [_trackJson(userId: 'alice')];
+
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<SectorMapView>(find.byType(SectorMapView)).teamTracks,
+        isNotEmpty,
+      );
+
+      await tester.tap(find.byKey(const Key('coverage_mine')));
+      await tester.pump();
+
+      // Not merely hidden by the map widget: the screen stops watching the
+      // provider at all, so its polling stops with it.
+      final map = tester.widget<SectorMapView>(find.byType(SectorMapView));
+      expect(map.coverageLayer, SearchCoverageLayer.mine);
+      expect(map.teamTracks, isEmpty);
+    });
+  });
+
+  group('alert moderation entry point', () {
+    testWidgets('a field volunteer is not offered the SOS alerts screen', (
+      tester,
+    ) async {
+      // Listing a sector's alerts is Lead/Commander-only server-side, so
+      // for a searcher the menu entry could only ever lead to an error.
+      permissionsJson = _permissionsJson(role: 'volunteer', canModerate: false);
+
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('session_overflow_menu')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sector reports'), findsOneWidget);
+      expect(find.byKey(const Key('menu_sos_alerts')), findsNothing);
+    });
+
+    testWidgets('a sector manager is', (tester) async {
+      permissionsJson = _permissionsJson(role: 'lead', canModerate: true);
+
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('session_overflow_menu')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('menu_sos_alerts')), findsOneWidget);
+    });
   });
 }

@@ -26,7 +26,6 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
-import asyncpg
 from fastapi import APIRouter, status
 
 from ..deps import ConnDep, CurrentUser, SettingsDep
@@ -132,18 +131,27 @@ async def join_sector(
     if swe is None or swe.sector.status != "open" or swe.event_status != "active":
         raise Conflict("this sector is not currently accepting volunteers")
 
-    try:
-        membership = await memberships_repo.create_pending(
-            conn,
-            sector_id=swe.sector.id,
-            user_id=user.id,
-            device_id=device.id,
-            movement_mode=payload.movement_mode,
-            battery_at_join=payload.battery_pct,
-            powerbank_attested=payload.powerbank_attested,
+    # Re-application after a rejection or removal is EXPECTED, not an error.
+    # `create_or_reopen_pending` reopens a terminal row (rejected/revoked/
+    # ended) as a fresh pending request; it returns None only when a request
+    # is genuinely still live, which is the one case that is a duplicate.
+    # Before this, the leftover row from a single rejection collided with
+    # UNIQUE(sector_id, device_id) forever, so one mis-tap by a Lead locked
+    # that volunteer out of that sector for the rest of the callout.
+    membership = await memberships_repo.create_or_reopen_pending(
+        conn,
+        sector_id=swe.sector.id,
+        user_id=user.id,
+        device_id=device.id,
+        movement_mode=payload.movement_mode,
+        battery_at_join=payload.battery_pct,
+        powerbank_attested=payload.powerbank_attested,
+    )
+    if membership is None:
+        raise Conflict(
+            "you already have a request for this sector on this device; "
+            "wait for it to be approved or rejected"
         )
-    except asyncpg.UniqueViolationError as exc:
-        raise Conflict("you already have a request for this sector on this device") from exc
 
     warning = None
     if payload.battery_pct <= settings.battery_warn_threshold_pct:
@@ -231,6 +239,15 @@ async def approve_membership(
 async def reject_membership(
     membership_id: uuid.UUID, user: CurrentUser, conn: ConnDep
 ) -> MembershipOut:
+    """Turns down a pending request. NOT a permanent ban.
+
+    The rejected row stays (it is the record of the decision), but it no
+    longer blocks the same device from asking again -- `POST /join` reopens
+    a terminal row rather than colliding with it. A Lead who rejects the
+    wrong person, or who turns someone away at 2am and wants them at 6am,
+    does not have to be told the system will never let that volunteer back
+    into this sector.
+    """
     pending = await memberships_repo.get(conn, membership_id)
     if pending is None:
         raise NotFound("membership not found")
@@ -239,6 +256,7 @@ async def reject_membership(
     membership = await memberships_repo.reject(conn, membership_id)
     if membership is None:
         raise Conflict("membership is not pending")
+    logger.info("membership rejected id=%s by=%s (may re-apply)", membership_id, user.id)
     return _membership_to_out(membership)
 
 
@@ -246,14 +264,30 @@ async def reject_membership(
 async def revoke_membership(
     membership_id: uuid.UUID, user: CurrentUser, conn: ConnDep
 ) -> MembershipOut:
+    """Removes one member from ONE sector. (To remove someone from an entire
+    event, see `DELETE /events/{id}/members/{user_id}`.)
+
+    Access ends on their next request -- `current_membership` re-checks the
+    row's status -- and the `membership_revoked` trigger simultaneously
+    closes any dashboard socket they hold, so a removed member stops
+    receiving live data immediately rather than at their next poll. Their
+    scan history is untouched and stays attributed to them, and nothing here
+    prevents them from re-applying with a valid join code.
+    """
     existing = await memberships_repo.get(conn, membership_id)
     if existing is None:
         raise NotFound("membership not found")
-    await require_lead_or_commander(conn, existing.sector_id, user)
+    swe = await require_lead_or_commander(conn, existing.sector_id, user)
 
-    membership = await memberships_repo.revoke(conn, membership_id)
-    if membership is None:
-        raise Conflict("membership is not approved")
+    async with conn.transaction():
+        membership = await memberships_repo.revoke(conn, membership_id)
+        if membership is None:
+            raise Conflict("membership is not approved")
+        # `sectors.lead_user_id` is a separate pointer from the membership
+        # row, and `require_lead_or_commander` reads THAT one -- leaving it
+        # set would keep a removed Lead passing every Lead check here.
+        if swe.sector.lead_user_id == membership.user_id:
+            await sectors_repo.set_lead(conn, existing.sector_id, None)
 
     logger.info("membership revoked id=%s by=%s", membership_id, user.id)
     return _membership_to_out(membership)

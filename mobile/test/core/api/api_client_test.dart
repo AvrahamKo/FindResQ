@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:lifesearch_mobile/core/api/api_client.dart';
 import 'package:lifesearch_mobile/core/api/api_exception.dart';
+import 'package:lifesearch_mobile/core/api/api_models.dart';
 
 ApiClient _clientReturning(http.Response Function(http.Request) handler) {
   return ApiClient(
@@ -558,6 +559,154 @@ void main() {
       expect(result.cells.single.hexId, '8c2db2b25155dff');
       expect(result.cells.single.boundary.first.latitude, 31.7);
       expect(result.cells.single.boundary.first.longitude, 35.2);
+    });
+  });
+
+  group('team tracks', () {
+    Map<String, dynamic> trackBody() => {
+      'sector_id': 's1',
+      'tracks': [
+        {
+          'segment_id': 'seg-1',
+          'user_id': 'teammate-1',
+          'device_id': 'dev-1',
+          'movement_mode': 'walker',
+          'started_at': '2030-01-01T00:00:00Z',
+          'ended_at': null,
+          'point_count': 42,
+          'points': [
+            [31.70, 35.20],
+            [31.71, 35.21],
+          ],
+        },
+        {
+          'segment_id': 'seg-2',
+          'user_id': 'teammate-2',
+          'device_id': 'dev-2',
+          'movement_mode': 'vehicle',
+          'started_at': '2030-01-01T00:00:00Z',
+          'ended_at': '2030-01-01T01:00:00Z',
+          'point_count': 8,
+          'points': [
+            [31.72, 35.22],
+            [31.73, 35.23],
+          ],
+        },
+      ],
+      'server_time': '2030-01-01T02:00:00Z',
+    };
+
+    test('parses every team member\'s path, not just one', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json(trackBody(), 200);
+      });
+
+      final result = await client.getSectorTracks(
+        accountToken: 'acct-tok',
+        sectorId: 's1',
+      );
+
+      expect(captured!.url.path, '/sectors/s1/tracks');
+      expect(captured!.headers['authorization'], 'Bearer acct-tok');
+      // The whole point of the endpoint: more than one searcher.
+      expect(result.tracks.map((t) => t.userId), ['teammate-1', 'teammate-2']);
+      expect(result.serverTime, DateTime.parse('2030-01-01T02:00:00Z'));
+    });
+
+    test('points stay in (lat, lng) order -- no GeoJSON transposition', () async {
+      final client = _clientReturning((_) => _json(trackBody(), 200));
+
+      final result = await client.getSectorTracks(
+        accountToken: 'acct-tok',
+        sectorId: 's1',
+      );
+
+      // A swap does not throw, it just puts the team in the wrong place, so
+      // this asserts the actual values rather than merely a parse.
+      expect(result.tracks.first.points.first.latitude, 31.70);
+      expect(result.tracks.first.points.first.longitude, 35.20);
+    });
+
+    test('a null ended_at marks a segment as still being walked', () async {
+      final client = _clientReturning((_) => _json(trackBody(), 200));
+
+      final result = await client.getSectorTracks(
+        accountToken: 'acct-tok',
+        sectorId: 's1',
+      );
+
+      expect(result.tracks[0].isLive, isTrue);
+      expect(result.tracks[1].isLive, isFalse);
+      // point_count is the RAW count and may exceed the simplified polyline.
+      expect(result.tracks[0].pointCount, 42);
+      expect(result.tracks[0].points.length, 2);
+    });
+
+    test('since is sent as a UTC ISO-8601 query parameter', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json(trackBody(), 200);
+      });
+
+      await client.getSectorTracks(
+        accountToken: 'acct-tok',
+        sectorId: 's1',
+        since: DateTime.utc(2030, 1, 1, 12, 30),
+      );
+
+      expect(captured!.url.queryParameters['since'], '2030-01-01T12:30:00.000Z');
+    });
+
+    test('omits since entirely when null', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json(trackBody(), 200);
+      });
+
+      await client.getSectorTracks(accountToken: 'acct-tok', sectorId: 's1');
+
+      expect(captured!.url.queryParameters.containsKey('since'), isFalse);
+    });
+  });
+
+  group('sector permissions', () {
+    test('parses the caller\'s capabilities', () async {
+      http.Request? captured;
+      final client = _clientReturning((request) {
+        captured = request;
+        return _json({
+          'sector_id': 's1',
+          'role': 'lead',
+          'is_commander': false,
+          'is_sector_manager': true,
+          'can_acknowledge_alerts': true,
+          'can_delete_alerts': true,
+          'can_moderate_members': true,
+        }, 200);
+      });
+
+      final result = await client.getSectorPermissions(
+        accountToken: 'acct-tok',
+        sectorId: 's1',
+      );
+
+      expect(captured!.url.path, '/sectors/s1/permissions');
+      expect(result.isSectorManager, isTrue);
+      expect(result.canAcknowledgeAlerts, isTrue);
+    });
+
+    test('the none fallback grants nothing', () {
+      // The value every failure path resolves to. If this ever gains a
+      // `true`, the UI starts offering actions the server will refuse.
+      expect(SectorPermissions.none.canAcknowledgeAlerts, isFalse);
+      expect(SectorPermissions.none.canDeleteAlerts, isFalse);
+      expect(SectorPermissions.none.canModerateMembers, isFalse);
+      expect(SectorPermissions.none.isCommander, isFalse);
+      expect(SectorPermissions.none.isSectorManager, isFalse);
     });
   });
 }

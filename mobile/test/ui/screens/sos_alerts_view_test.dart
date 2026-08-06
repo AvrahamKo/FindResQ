@@ -40,19 +40,44 @@ Widget _wrap(ProviderContainer container) => UncontrolledProviderScope(
   child: const MaterialApp(home: SosAlertsView()),
 );
 
+/// The sector-permissions body. `canModerate` decides whether the backend
+/// would accept an acknowledge from this user -- and therefore whether the
+/// UI is allowed to offer one.
+Map<String, dynamic> _permissionsJson({
+  String role = 'lead',
+  bool canModerate = true,
+}) => {
+  'sector_id': 's1',
+  'role': role,
+  'is_commander': role == 'commander',
+  'is_sector_manager': role == 'lead',
+  'can_acknowledge_alerts': canModerate,
+  'can_delete_alerts': canModerate,
+  'can_moderate_members': canModerate,
+};
+
 void main() {
   late ProviderContainer container;
 
   Future<void> setUpWithHandler(
-    http.Response Function(http.Request) handler,
-  ) async {
+    http.Response Function(http.Request) handler, {
+    Map<String, dynamic>? permissions,
+  }) async {
     container = ProviderContainer(
       overrides: [
         keyValueStoreProvider.overrideWith((ref) => InMemoryKeyValueStore()),
         apiClientProvider.overrideWith(
           (ref) => ApiClient(
             baseUrl: 'http://test.invalid',
-            httpClient: MockClient((request) async => handler(request)),
+            httpClient: MockClient((request) async {
+              // Intercepted here rather than in each test's handler: every
+              // test needs it, and the handlers below deliberately answer
+              // any other path with the alert list.
+              if (request.url.path == '/sectors/s1/permissions') {
+                return _json(permissions ?? _permissionsJson(), 200);
+              }
+              return handler(request);
+            }),
           ),
         ),
       ],
@@ -176,5 +201,138 @@ void main() {
     expect(find.text('SOS resolved'), findsOneWidget);
     expect(find.byKey(const Key('sos_acknowledge_alert-1')), findsNothing);
     expect(find.byKey(const Key('sos_resolve_alert-1')), findsNothing);
+  });
+
+  group('alert moderation is restricted', () {
+    testWidgets('a field volunteer sees the alert but gets NO Acknowledge', (
+      tester,
+    ) async {
+      await setUpWithHandler(
+        (r) => http.Response(
+          jsonEncode([_alertJson()]),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+        permissions: _permissionsJson(role: 'volunteer', canModerate: false),
+      );
+
+      await tester.pumpWidget(_wrap(container));
+      await tester.pumpAndSettle();
+
+      // Visibility is intentional: a searcher should know an alert exists.
+      expect(find.text('SOS active'), findsOneWidget);
+      // Acting on it is not theirs to do -- acknowledging clears the alarm
+      // for the whole team and claims responsibility for the response.
+      expect(find.byKey(const Key('sos_acknowledge_alert-1')), findsNothing);
+      expect(find.byKey(const Key('sos_resolve_alert-1')), findsNothing);
+    });
+
+    testWidgets('a volunteer gets no Resolve on an acknowledged alert either', (
+      tester,
+    ) async {
+      await setUpWithHandler(
+        (r) => http.Response(
+          jsonEncode([_alertJson(status: 'acknowledged')]),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+        permissions: _permissionsJson(role: 'volunteer', canModerate: false),
+      );
+
+      await tester.pumpWidget(_wrap(container));
+      await tester.pumpAndSettle();
+
+      expect(find.text('SOS acknowledged'), findsOneWidget);
+      expect(find.byKey(const Key('sos_resolve_alert-1')), findsNothing);
+    });
+
+    testWidgets('the event commander is a moderator too, not just the lead', (
+      tester,
+    ) async {
+      await setUpWithHandler(
+        (r) => http.Response(
+          jsonEncode([_alertJson()]),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+        permissions: _permissionsJson(role: 'commander', canModerate: true),
+      );
+
+      await tester.pumpWidget(_wrap(container));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('sos_acknowledge_alert-1')), findsOneWidget);
+    });
+
+    testWidgets('an unreachable permissions endpoint fails CLOSED', (
+      tester,
+    ) async {
+      // The safe default when the server cannot be asked. Offering an
+      // Acknowledge that will be refused would let a searcher believe an
+      // emergency had been picked up when it had not.
+      await setUpWithHandler(
+        (r) => http.Response(
+          jsonEncode([_alertJson()]),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+        permissions: null,
+      );
+      // Rebuild the container with a permissions endpoint that errors.
+      container.dispose();
+      container = ProviderContainer(
+        overrides: [
+          keyValueStoreProvider.overrideWith((ref) => InMemoryKeyValueStore()),
+          apiClientProvider.overrideWith(
+            (ref) => ApiClient(
+              baseUrl: 'http://test.invalid',
+              httpClient: MockClient((request) async {
+                if (request.url.path == '/sectors/s1/permissions') {
+                  return _json({
+                    'error': {'code': 'unavailable', 'message': 'down'},
+                  }, 503);
+                }
+                return http.Response(
+                  jsonEncode([_alertJson()]),
+                  200,
+                  headers: {'content-type': 'application/json'},
+                );
+              }),
+            ),
+          ),
+        ],
+      );
+      final storage = container.read(secureStorageManagerProvider);
+      await storage.saveAccount(
+        StoredAccount(
+          accessToken: 'account-tok',
+          expiresAt: DateTime.now().add(const Duration(days: 1)),
+          userId: 'lead-1',
+          phoneE164: '+15551234567',
+          displayName: 'Test Lead',
+        ),
+      );
+      await storage.saveSession(
+        StoredSession(
+          accessToken: 'session-tok',
+          expiresAt: DateTime.now().add(const Duration(hours: 8)),
+          keyEpoch: 1,
+          sectorKeyBase64: 'a2V5Ynl0ZXM=',
+          membershipId: 'm1',
+          sectorId: 's1',
+          eventId: 'e1',
+          // Note: the STORED session still says 'lead'. The UI must not
+          // trust it -- that field is a snapshot from claim time and the
+          // server is the only authority on the current role.
+          role: 'lead',
+          movementMode: 'walker',
+        ),
+      );
+
+      await tester.pumpWidget(_wrap(container));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('sos_acknowledge_alert-1')), findsNothing);
+    });
   });
 }

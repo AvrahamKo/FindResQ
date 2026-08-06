@@ -76,6 +76,80 @@ async def list_for_user(conn: asyncpg.Connection, user_id: uuid.UUID) -> list[Ev
     return [_to_event(row) for row in rows]
 
 
+@dataclass(frozen=True, slots=True)
+class DeletionSummary:
+    """What a cascade delete is about to destroy, counted before it runs."""
+
+    sectors: int
+    memberships: int
+    track_segments: int
+    track_points: int
+    hex_contributions: int
+    reports: int
+    sos_alerts: int
+
+
+async def summarize_for_deletion(
+    conn: asyncpg.Connection, event_id: uuid.UUID
+) -> DeletionSummary:
+    """Counts the rows an event's cascade delete will take with it.
+
+    Must run before the delete, inside the same transaction -- afterwards
+    there is nothing left to count. This is what lets the API answer "what
+    did I just destroy?" with real numbers instead of an empty 204, which
+    matters for the audit log of an irreversible operation.
+    """
+    row = await conn.fetchrow(
+        """
+        WITH s AS (SELECT id FROM sectors WHERE event_id = $1)
+        SELECT
+            (SELECT count(*) FROM s)                                          AS sectors,
+            (SELECT count(*) FROM sector_memberships
+              WHERE sector_id IN (SELECT id FROM s))                          AS memberships,
+            (SELECT count(*) FROM track_segments
+              WHERE sector_id IN (SELECT id FROM s))                          AS track_segments,
+            (SELECT count(*) FROM track_points
+              WHERE sector_id IN (SELECT id FROM s))                          AS track_points,
+            (SELECT count(*) FROM hex_contributions
+              WHERE sector_id IN (SELECT id FROM s))                          AS hex_contributions,
+            (SELECT count(*) FROM reports
+              WHERE sector_id IN (SELECT id FROM s))                          AS reports,
+            (SELECT count(*) FROM sos_alerts
+              WHERE sector_id IN (SELECT id FROM s))                          AS sos_alerts
+        """,
+        event_id,
+    )
+    return DeletionSummary(**dict(row))
+
+
+async def delete(conn: asyncpg.Connection, event_id: uuid.UUID) -> list[uuid.UUID] | None:
+    """Hard-deletes an event and, by FK cascade, everything under it.
+
+    Returns the ids of the sectors that were destroyed (so the caller can
+    purge per-sector in-memory state), or None if no such event existed.
+
+    Every child table declares `ON DELETE CASCADE` back to `events` or to
+    `sectors` (migration 0001), so this single statement purges sectors,
+    sector keys, memberships, join codes, track segments/points, hex
+    contributions, derived hex coverage, reports, device presence, SOS
+    alerts and the subject record. That is deliberate: an application-side
+    delete list would be a second, silently-drifting copy of the schema's
+    own parent/child structure, and the failure mode of it drifting is
+    orphaned rows nobody ever looks for again.
+
+    The sector ids are read INSIDE the caller's transaction, before the
+    delete, because afterwards there is nowhere left to read them from.
+    """
+    sector_ids = [
+        row["id"]
+        for row in await conn.fetch("SELECT id FROM sectors WHERE event_id = $1", event_id)
+    ]
+    deleted = await conn.fetchval(
+        "DELETE FROM events WHERE id = $1 RETURNING id", event_id
+    )
+    return sector_ids if deleted is not None else None
+
+
 async def set_status(
     conn: asyncpg.Connection,
     event_id: uuid.UUID,

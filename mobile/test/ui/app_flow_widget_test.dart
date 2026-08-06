@@ -113,6 +113,31 @@ void main() {
             'session_expires_at': '2030-01-01T00:00:00Z',
           }, 200),
         )
+        // The active-session map asks for these as soon as it appears.
+        // Registered before the catch-alls above would matter, and kept
+        // explicit so an unexpected sector request still fails the test.
+        ..on(
+          'GET',
+          '/sectors/s1/tracks',
+          (r) => _json({
+            'sector_id': 's1',
+            'tracks': <Map<String, dynamic>>[],
+            'server_time': '2030-01-01T00:00:00Z',
+          }, 200),
+        )
+        ..on(
+          'GET',
+          '/sectors/s1/permissions',
+          (r) => _json({
+            'sector_id': 's1',
+            'role': 'volunteer',
+            'is_commander': false,
+            'is_sector_manager': false,
+            'can_acknowledge_alerts': false,
+            'can_delete_alerts': false,
+            'can_moderate_members': false,
+          }, 200),
+        )
         ..on(
           'POST',
           '/memberships/m1/session',
@@ -141,6 +166,9 @@ void main() {
             ),
           ),
           keyValueStoreProvider.overrideWith((ref) => InMemoryKeyValueStore()),
+          // See teamTracksPollIntervalProvider: a live periodic timer would
+          // outlive the pump and trip the binding's pending-timer check.
+          teamTracksPollIntervalProvider.overrideWithValue(null),
         ],
       );
       addTearDown(container.dispose);

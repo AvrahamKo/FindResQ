@@ -102,7 +102,7 @@ async def _make_session(conn, *, sector, user_id: uuid.UUID, device_id: uuid.UUI
     unexpired, sector key_epoch matching) is satisfied for real -- not a
     hand-waved fake JWT."""
     settings = get_settings()
-    membership = await memberships_repo.create_pending(
+    membership = await memberships_repo.create_or_reopen_pending(
         conn,
         sector_id=sector.id,
         user_id=user_id,

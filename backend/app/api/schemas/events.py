@@ -26,6 +26,39 @@ class EventOut(BaseModel):
     created_at: datetime
 
 
+class EventDeleteResult(BaseModel):
+    """What a cascade delete actually destroyed.
+
+    Returned instead of a bare 204 because this is irreversible: the
+    commander who just pressed the button, and anyone reading the audit log
+    afterwards, should be able to see the size of what went with it.
+    """
+
+    event_id: uuid.UUID
+    sectors_deleted: int
+    memberships_deleted: int
+    track_segments_deleted: int
+    track_points_deleted: int
+    hex_contributions_deleted: int
+    reports_deleted: int
+    sos_alerts_deleted: int
+
+
+class MemberRemovalResult(BaseModel):
+    event_id: uuid.UUID
+    user_id: uuid.UUID
+    memberships_revoked: int
+    lead_roles_cleared: int
+    history_retained: bool = Field(
+        default=True,
+        description=(
+            "Always true. Removal ends access; the user's track segments, "
+            "coverage contributions, reports and past alerts are retained "
+            "and stay attributed to them."
+        ),
+    )
+
+
 class SubjectUpsert(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     age_years: int | None = Field(default=None, ge=0, le=130)

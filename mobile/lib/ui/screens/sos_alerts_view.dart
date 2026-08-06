@@ -44,6 +44,19 @@ class _SosAlertsViewState extends ConsumerState<SosAlertsView> {
     final state = ref.watch(sosAlertsControllerProvider);
     final notifier = ref.read(sosAlertsControllerProvider.notifier);
 
+    // Second line of defence, not the first. This screen is only reachable
+    // from the overflow menu when the same permission is present, and the
+    // backend refuses regardless -- but the menu is not the only possible
+    // route here (a deep link, a future shortcut), and a role can be
+    // revoked while the screen is open, so the buttons check for
+    // themselves rather than trusting how the user arrived.
+    final canModerate = ref
+        .watch(sectorPermissionsProvider)
+        .maybeWhen(
+          data: (value) => value.canAcknowledgeAlerts,
+          orElse: () => false,
+        );
+
     return Scaffold(
       appBar: AppBar(title: const Text('Sector SOS alerts')),
       body: switch (state) {
@@ -73,19 +86,26 @@ class _SosAlertsViewState extends ConsumerState<SosAlertsView> {
                     ? '${alert.lat!.toStringAsFixed(5)}, ${alert.lng!.toStringAsFixed(5)}'
                     : 'no location',
               ),
-              trailing: switch (alert.status) {
-                'active' => FilledButton(
-                  key: Key('sos_acknowledge_${alert.id}'),
-                  onPressed: () => notifier.acknowledge(alert.id),
-                  child: const Text('Acknowledge'),
-                ),
-                'acknowledged' => OutlinedButton(
-                  key: Key('sos_resolve_${alert.id}'),
-                  onPressed: () => notifier.resolve(alert.id),
-                  child: const Text('Resolve'),
-                ),
-                _ => null,
-              },
+              // Read-only for anyone who is not this sector's manager or
+              // the event commander. Acknowledging is a claim of
+              // responsibility that clears the alarm for the whole team --
+              // a searcher must be able to SEE an alert without being able
+              // to stand it down on someone else's behalf.
+              trailing: !canModerate
+                  ? null
+                  : switch (alert.status) {
+                      'active' => FilledButton(
+                        key: Key('sos_acknowledge_${alert.id}'),
+                        onPressed: () => notifier.acknowledge(alert.id),
+                        child: const Text('Acknowledge'),
+                      ),
+                      'acknowledged' => OutlinedButton(
+                        key: Key('sos_resolve_${alert.id}'),
+                        onPressed: () => notifier.resolve(alert.id),
+                        child: const Text('Resolve'),
+                      ),
+                      _ => null,
+                    },
             );
           },
         ),

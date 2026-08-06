@@ -26,6 +26,7 @@ from .api.routes import (
     reports,
     sectors,
     sos,
+    tracks,
     ws,
 )
 from .config import get_settings
@@ -64,7 +65,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.connection_manager = ConnectionManager()
     app.state.ticket_store = TicketStore()
 
-    listener = RealtimeListener(settings.database_url, pool, app.state.connection_manager)
+    listener = RealtimeListener(
+        settings.database_url,
+        pool,
+        app.state.connection_manager,
+        app.state.ticket_store,
+    )
     await listener.start()
 
     sweep_task = asyncio.create_task(
@@ -134,6 +140,7 @@ app.include_router(sectors.router)
 app.include_router(memberships.router)
 app.include_router(ingest.router)
 app.include_router(coverage.router)
+app.include_router(tracks.router)
 app.include_router(presence.router)
 app.include_router(sos.router)
 app.include_router(reports.router)

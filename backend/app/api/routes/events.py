@@ -17,7 +17,14 @@ from fastapi import APIRouter, status
 
 from ..deps import ConnDep, CurrentUser
 from ..rbac import require_commander
-from ..schemas.events import EventCreate, EventOut, SubjectOut, SubjectUpsert
+from ..schemas.events import (
+    EventCreate,
+    EventDeleteResult,
+    EventOut,
+    MemberRemovalResult,
+    SubjectOut,
+    SubjectUpsert,
+)
 from ...errors import Conflict, Forbidden, NotFound
 from ...repositories import events as events_repo
 from ...repositories import memberships as memberships_repo
@@ -62,6 +69,14 @@ async def list_events(user: CurrentUser, conn: ConnDep) -> list[EventOut]:
 async def _get_visible_event(
     conn: ConnDep, event_id: uuid.UUID, user: CurrentUser
 ) -> events_repo.Event:
+    """Read access to an event: its Commander, or anyone holding a
+    membership that still grants visibility.
+
+    `user_has_membership_in_event` filters on status (see its docstring):
+    a revoked or rejected membership is not a role, so a removed user loses
+    the event -- and with it the sector list and the WebSocket ticket, both
+    of which funnel through here -- on their very next request.
+    """
     event = await events_repo.get(conn, event_id)
     if event is None:
         raise NotFound("event not found")
@@ -112,6 +127,130 @@ async def end_event(event_id: uuid.UUID, user: CurrentUser, conn: ConnDep) -> Ev
 
     logger.info("event ended id=%s", event_id)
     return _to_out(event)
+
+
+@router.delete("/{event_id}", response_model=EventDeleteResult)
+async def delete_event(event_id: uuid.UUID, user: CurrentUser, conn: ConnDep) -> EventDeleteResult:
+    """Commander-only, irreversible, total.
+
+    Unlike `/end` -- which closes an event but keeps every record for the
+    after-action review -- this destroys the callout: sectors and their
+    boundaries, sector keys, memberships, join codes, track segments and
+    points, the coverage ledger and derived POD state, reports, device
+    presence, SOS alerts, and the subject's PII record.
+
+    The purge runs on three layers, because deleting rows alone is not
+    enough:
+
+      * DATABASE -- one `DELETE FROM events`. Every child table declares
+        `ON DELETE CASCADE` (migration 0001), so the schema itself defines
+        the closure; see `events_repo.delete` for why this is not an
+        application-side delete list.
+      * IN-MEMORY -- the `events_notify_deleted` trigger (migration 0008)
+        fires the `event_deleted_channel` NOTIFY, and the realtime listener
+        closes every dashboard socket for the event, purges its outstanding
+        WS tickets, and prunes the now-dangling per-sector checkpoints it
+        was holding. Skipping this leaks a socket group and four checkpoint
+        entries per deleted sector for the process's whole lifetime.
+      * DEVICES -- field handsets are not reachable to be told. They are
+        cut off structurally instead: `current_membership` re-checks the
+        membership row on every request (api/deps.py), and that row is gone,
+        so the very next call from a device in the field fails closed. A
+        phone that is in a dead zone at delete time simply finds this out
+        when it comes back.
+
+    The count of what was removed is read back before the delete so the
+    response can state plainly what was destroyed.
+    """
+    event = await require_commander(conn, event_id, user)
+
+    async with conn.transaction():
+        summary = await events_repo.summarize_for_deletion(conn, event_id)
+        sector_ids = await events_repo.delete(conn, event_id)
+        if sector_ids is None:
+            # Lost a race with another commander session doing the same
+            # thing; the end state is the one that was asked for either way.
+            raise NotFound("event not found")
+
+    logger.warning(
+        "EVENT DELETED id=%s name=%r by=%s sectors=%d memberships=%d "
+        "track_points=%d contributions=%d reports=%d sos=%d",
+        event_id, event.name, user.id, len(sector_ids),
+        summary.memberships, summary.track_points, summary.hex_contributions,
+        summary.reports, summary.sos_alerts,
+    )
+    return EventDeleteResult(
+        event_id=event_id,
+        sectors_deleted=len(sector_ids),
+        memberships_deleted=summary.memberships,
+        track_segments_deleted=summary.track_segments,
+        track_points_deleted=summary.track_points,
+        hex_contributions_deleted=summary.hex_contributions,
+        reports_deleted=summary.reports,
+        sos_alerts_deleted=summary.sos_alerts,
+    )
+
+
+@router.delete("/{event_id}/members/{user_id}", response_model=MemberRemovalResult)
+async def remove_event_member(
+    event_id: uuid.UUID, user_id: uuid.UUID, user: CurrentUser, conn: ConnDep
+) -> MemberRemovalResult:
+    """Removes a user from an event entirely: every sector, every device.
+
+    Two properties this deliberately holds, which pull in opposite
+    directions and are the whole reason this endpoint is not a plain DELETE:
+
+    ACCESS ENDS IMMEDIATELY. Every live membership goes to 'revoked' with
+    `session_expires_at = now()`, which `current_membership` rejects on the
+    device's next request -- no telemetry, no reports, no SOS, and (since
+    `user_has_membership_in_event` is status-filtered) no read access to the
+    event either. The `membership_revoked` trigger simultaneously hangs up
+    any dashboard socket they hold, so a removed user watching a live map
+    does not keep watching it.
+
+    HISTORY SURVIVES. Nothing is deleted. Their track segments, points, hex
+    contributions, reports and past alerts all stay exactly where they are,
+    still attributed to them. That is not an oversight to tidy up later: the
+    coverage map's central claim is "this ground was searched, by someone,
+    at this time", and silently retracting a removed volunteer's tracks
+    would re-open ground that really was walked -- turning a personnel
+    decision into a search-planning lie. Removing a person from the team is
+    not the same act as retracting their work, and only the latter belongs
+    to `track_segments.is_valid`.
+
+    The Commander cannot be removed from their own event -- there would be
+    nobody left who could administer it.
+    """
+    await require_commander(conn, event_id, user)
+
+    if user_id == user.id:
+        raise Conflict("you cannot remove yourself from an event you command")
+
+    memberships = await memberships_repo.list_for_event_user(conn, event_id, user_id)
+    if not memberships:
+        raise NotFound("this user holds no membership in this event")
+
+    async with conn.transaction():
+        revoked = await memberships_repo.revoke_all_for_user_in_event(
+            conn, event_id, user_id
+        )
+        # A removed member must not stay listed as a sector's Lead: the
+        # sectors row is a separate pointer from the membership row, and a
+        # stale one would keep passing `require_lead_or_commander`.
+        cleared_leads = await sectors_repo.clear_lead_for_user(conn, event_id, user_id)
+
+    logger.warning(
+        "member removed from event event_id=%s user_id=%s by=%s "
+        "memberships_revoked=%d lead_roles_cleared=%d (history retained)",
+        event_id, user_id, user.id, revoked, cleared_leads,
+    )
+    return MemberRemovalResult(
+        event_id=event_id,
+        user_id=user_id,
+        memberships_revoked=revoked,
+        lead_roles_cleared=cleared_leads,
+        history_retained=True,
+    )
 
 
 @router.put("/{event_id}/subject", response_model=SubjectOut)
