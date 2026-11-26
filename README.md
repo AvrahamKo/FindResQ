@@ -7,12 +7,12 @@ FindResQ brings field volunteers and search coordinators onto the same map. Volu
 ## In the field
 
 <p>
-  <img src="docs/screenshots/field-map.png" width="224" alt="FindResQ field map showing a sector boundary, team tracks, colored coverage cells, GPS accuracy, battery and sync status">
-  <img src="docs/screenshots/quick-report.png" width="224" alt="Quick report menu with options for subject found, medical, item found, hazard and no passage">
-  <img src="docs/screenshots/sos-active.png" width="224" alt="Field map after an SOS is accepted, showing SOS ACTIVE and the Manage button">
+  <a href="docs/screenshots/field-map.png"><img src="docs/screenshots/field-map.png" width="260" alt="FindResQ field map of Sacher Park in Jerusalem with real paths and landmarks beneath the sector boundary, team tracks and coverage cells"></a>
+  <a href="docs/screenshots/quick-report.png"><img src="docs/screenshots/quick-report.png" width="260" alt="Quick report menu over the Sacher Park map, with options for subject found, medical, item found, hazard and no passage"></a>
+  <a href="docs/screenshots/sos-active.png"><img src="docs/screenshots/sos-active.png" width="260" alt="Sacher Park field map with a simulated active SOS and the Manage button"></a>
 </p>
 
-From left to right: the team coverage map, the quick-report menu, and an active SOS. These screens were rendered from the Flutter app with simulated incident data and the base map tiles disabled.
+Team coverage, quick reporting, and an active SOS in a simulated search at Sacher Park, Jerusalem. Select any screenshot to view it full size. Base map © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright).
 
 ## How it works
 
