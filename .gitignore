@@ -3,6 +3,7 @@
 !.env.example
 
 /.github-publish-local/
+/.claude/
 /.idea/
 /venv/
 /.venv/
