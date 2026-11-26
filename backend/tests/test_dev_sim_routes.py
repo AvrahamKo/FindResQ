@@ -56,7 +56,7 @@ async def real_conn():
 async def _make_sector(conn) -> uuid.UUID:
     commander_id = await conn.fetchval(
         "INSERT INTO users (phone_e164, display_name) VALUES ($1, $2) RETURNING id",
-        f"+1555{uuid.uuid4().int % 10_000_000:07d}",
+        f"+1555{uuid.uuid4().int % 10_000_000_000:010d}",
         "Dev Sim Commander",
     )
     event_id = await conn.fetchval(
@@ -267,7 +267,7 @@ class TestUnitProvisioning:
 
         real_user = await real_conn.fetchval(
             "INSERT INTO users (phone_e164, display_name) VALUES ($1, $2) RETURNING id",
-            f"+1555{uuid.uuid4().int % 10_000_000:07d}",
+            f"+1555{uuid.uuid4().int % 10_000_000_000:010d}",
             "Genuine Volunteer",
         )
         real_device = await real_conn.fetchval(

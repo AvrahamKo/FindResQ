@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import asyncpg
 
@@ -40,8 +40,6 @@ async def create(
     ttl_seconds: int,
     max_uses: int | None,
 ) -> JoinCode:
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
-
     # `code` is the PK; a collision is astronomically unlikely at 10^6 codes
     # but not impossible, so retry a few times on conflict rather than crash.
     for _ in range(_MAX_GENERATION_ATTEMPTS):
@@ -50,13 +48,13 @@ async def create(
             row = await conn.fetchrow(
                 """
                 INSERT INTO join_codes (code, sector_id, created_by, expires_at, max_uses)
-                VALUES ($1, $2, $3, $4, $5)
+                VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)
                 RETURNING code, sector_id, created_by, expires_at, max_uses, uses, revoked_at
                 """,
                 code,
                 sector_id,
                 created_by,
-                expires_at,
+                ttl_seconds,
                 max_uses,
             )
         except asyncpg.UniqueViolationError:
@@ -64,6 +62,28 @@ async def create(
         return _to_join_code(row)
 
     raise RuntimeError("could not generate a unique join code")
+
+
+async def list_active(conn: asyncpg.Connection, sector_id: uuid.UUID) -> list[JoinCode]:
+    """Returns every code that can still be redeemed for this sector.
+
+    The dashboard used to remember only codes created in its current browser
+    tab, making existing codes invisible and impossible to revoke after a
+    refresh. The database is the source of truth for their lifecycle.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT code, sector_id, created_by, expires_at, max_uses, uses, revoked_at
+        FROM join_codes
+        WHERE sector_id = $1
+          AND revoked_at IS NULL
+          AND expires_at > now()
+          AND (max_uses IS NULL OR uses < max_uses)
+        ORDER BY expires_at, code
+        """,
+        sector_id,
+    )
+    return [_to_join_code(row) for row in rows]
 
 
 async def redeem(conn: asyncpg.Connection, code: str) -> JoinCode | None:

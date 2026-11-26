@@ -166,8 +166,9 @@ void main() {
             ),
           ),
           keyValueStoreProvider.overrideWith((ref) => InMemoryKeyValueStore()),
-          // See teamTracksPollIntervalProvider: a live periodic timer would
-          // outlive the pump and trip the binding's pending-timer check.
+          // Live map polling timers would outlive the pump and trip the
+          // binding's pending-timer check.
+          coveragePollIntervalProvider.overrideWithValue(null),
           teamTracksPollIntervalProvider.overrideWithValue(null),
         ],
       );

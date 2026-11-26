@@ -37,10 +37,18 @@ class Membership:
     battery_at_join: int | None
     powerbank_attested: bool
     created_at: datetime
+    display_name: str | None = None
+    phone_e164: str | None = None
 
 
 def _to_membership(row: asyncpg.Record) -> Membership:
-    return Membership(**dict(row))
+    values = dict(row)
+    # Most lifecycle queries intentionally touch only sector_memberships.
+    # Leadership list queries join users and add the two human-readable
+    # identity fields below.
+    values.setdefault("display_name", None)
+    values.setdefault("phone_e164", None)
+    return Membership(**values)
 
 
 # A membership in one of these statuses is over: the volunteer was turned
@@ -181,18 +189,53 @@ async def list_for_sector(
 ) -> list[Membership]:
     if status is None:
         rows = await conn.fetch(
-            f"SELECT {_COLUMNS} FROM sector_memberships WHERE sector_id = $1 "
-            "ORDER BY created_at",
+            f"""
+            SELECT {', '.join(f'm.{column.strip()}' for column in _COLUMNS.split(','))},
+                   u.display_name, u.phone_e164
+            FROM sector_memberships m
+            JOIN users u ON u.id = m.user_id
+            WHERE m.sector_id = $1
+            ORDER BY m.created_at
+            """,
             sector_id,
         )
     else:
         rows = await conn.fetch(
-            f"SELECT {_COLUMNS} FROM sector_memberships "
-            "WHERE sector_id = $1 AND status = $2 ORDER BY created_at",
+            f"""
+            SELECT {', '.join(f'm.{column.strip()}' for column in _COLUMNS.split(','))},
+                   u.display_name, u.phone_e164
+            FROM sector_memberships m
+            JOIN users u ON u.id = m.user_id
+            WHERE m.sector_id = $1 AND m.status = $2
+            ORDER BY m.created_at
+            """,
             sector_id,
             status,
         )
     return [_to_membership(row) for row in rows]
+
+
+async def update_movement_mode(
+    conn: asyncpg.Connection, membership_id: uuid.UUID, movement_mode: str
+) -> Membership | None:
+    """Changes an operational mode on a live request/membership only.
+
+    Terminal rows are history and must not be rewritten. The route closes an
+    approved device's current track segment before calling this function so
+    one segment can never mix walker and vehicle coverage assumptions.
+    """
+    row = await conn.fetchrow(
+        f"""
+        UPDATE sector_memberships
+        SET movement_mode = $2
+        WHERE id = $1 AND status = ANY($3::text[])
+        RETURNING {_COLUMNS}
+        """,
+        membership_id,
+        movement_mode,
+        list(LIVE_STATUSES),
+    )
+    return _to_membership(row) if row else None
 
 
 async def approve(

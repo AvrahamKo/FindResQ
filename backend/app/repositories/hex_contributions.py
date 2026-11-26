@@ -90,7 +90,10 @@ class HexCoverage:
 
 
 async def get_coverage_for_sector(
-    conn: asyncpg.Connection, sector_id: uuid.UUID, since: datetime | None
+    conn: asyncpg.Connection,
+    sector_id: uuid.UUID,
+    since: datetime | None,
+    until: datetime | None = None,
 ) -> list[HexCoverage]:
     """Powers `GET /sectors/{id}/hexes`. `since` supports delta polling from
     a live dashboard instead of re-fetching the whole sector every refresh."""
@@ -104,7 +107,7 @@ async def get_coverage_for_sector(
             """,
             sector_id,
         )
-    else:
+    elif until is None:
         rows = await conn.fetch(
             """
             SELECT hex_id, cumulative_pod, valid_contributions,
@@ -114,6 +117,20 @@ async def get_coverage_for_sector(
             """,
             sector_id,
             since,
+        )
+    else:
+        rows = await conn.fetch(
+            """
+            SELECT hex_id, cumulative_pod, valid_contributions,
+                   distinct_searchers, last_contribution_at
+            FROM hex_coverage_state
+            WHERE sector_id = $1
+              AND updated_at > $2
+              AND updated_at <= $3
+            """,
+            sector_id,
+            since,
+            until,
         )
     return [HexCoverage(**dict(row)) for row in rows]
 

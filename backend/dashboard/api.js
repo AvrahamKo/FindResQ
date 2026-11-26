@@ -112,9 +112,7 @@ export const api = {
   updateSectorBoundary: (sectorId, boundary) =>
     request("PATCH", `/sectors/${sectorId}`, { body: { boundary } }),
 
-  // No GET /sectors/{id}/join-codes exists server-side -- codes are
-  // ephemeral by design (default 12h TTL, see JoinCodeCreate), so the
-  // dashboard can only ever know about a code it just created itself.
+  listJoinCodes: (sectorId) => request("GET", `/sectors/${sectorId}/join-codes`),
   createJoinCode: (sectorId) =>
     request("POST", `/sectors/${sectorId}/join-codes`, { body: {} }),
   revokeJoinCode: (sectorId, code) =>
@@ -136,6 +134,10 @@ export const api = {
   // not re-key the sector -- the removed device keeps the sector key until
   // the epoch is bumped -- but its next request fails the membership check.
   revokeMembership: (membershipId) => request("POST", `/memberships/${membershipId}/revoke`),
+  updateMembership: (membershipId, movementMode) =>
+    request("PATCH", `/memberships/${membershipId}`, {
+      body: { movement_mode: movementMode },
+    }),
 
   // COMMANDER-ONLY (require_commander, not lead-or-commander), and the target
   // must already hold an approved membership in this sector -- promotion runs

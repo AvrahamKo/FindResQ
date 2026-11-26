@@ -34,15 +34,32 @@ class SessionActiveView extends ConsumerStatefulWidget {
   ConsumerState<SessionActiveView> createState() => _SessionActiveViewState();
 }
 
-class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
+class _SessionActiveViewState extends ConsumerState<SessionActiveView>
+    with WidgetsBindingObserver {
   SearchCoverageLayer _coverageLayer = SearchCoverageLayer.team;
+  bool _appIsResumed = true;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _appIsResumed = WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     Future.microtask(
       () => ref.read(personalTrailControllerProvider.notifier).ensureLoaded(),
     );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appIsResumed = state == AppLifecycleState.resumed;
+    _syncCoveragePolling();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   @override
@@ -94,6 +111,8 @@ class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
                     teamTracks: teamTracks,
                     personalTrail: personalTrail,
                     coverageLayer: _coverageLayer,
+                    onCoverageCellTap: (cell) =>
+                        _showCoverageDetails(context, cell),
                   ),
                 ),
                 Positioned(
@@ -101,9 +120,7 @@ class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
                   top: 12,
                   child: _CoverageToggle(
                     value: _coverageLayer,
-                    onChanged: (value) => setState(() {
-                      _coverageLayer = value;
-                    }),
+                    onChanged: _selectCoverageLayer,
                   ),
                 ),
                 if (boundary.isEmpty)
@@ -114,6 +131,12 @@ class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
                     child: _MapNotice(
                       'Sector outline unavailable offline — your position is still tracked.',
                     ),
+                  ),
+                if (_coverageLayer == SearchCoverageLayer.team)
+                  const Positioned(
+                    left: 12,
+                    bottom: 12,
+                    child: _CoverageLegend(),
                   ),
                 Positioned(
                   right: 12,
@@ -134,6 +157,26 @@ class _SessionActiveViewState extends ConsumerState<SessionActiveView> {
     if (ingestSyncAt == null) return coverageSyncAt;
     if (coverageSyncAt == null) return ingestSyncAt;
     return ingestSyncAt.isAfter(coverageSyncAt) ? ingestSyncAt : coverageSyncAt;
+  }
+
+  void _selectCoverageLayer(SearchCoverageLayer value) {
+    setState(() => _coverageLayer = value);
+    _syncCoveragePolling();
+  }
+
+  void _syncCoveragePolling() {
+    if (!mounted) return;
+    ref.read(coveragePollingEnabledProvider.notifier).state =
+        _appIsResumed && _coverageLayer == SearchCoverageLayer.team;
+  }
+
+  void _showCoverageDetails(BuildContext context, CoverageCell cell) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      showDragHandle: true,
+      builder: (_) => _CoverageDetailsSheet(cell: cell),
+    );
   }
 
   StatusChipData _gpsChip(TrackingState tracking) => switch (tracking) {
@@ -291,6 +334,223 @@ class _CoverageToggle extends StatelessWidget {
   }
 }
 
+class _CoverageLegend extends StatelessWidget {
+  const _CoverageLegend();
+
+  @override
+  Widget build(BuildContext context) {
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Container(
+        key: const Key('coverage_legend'),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: const Color(0xE6161B22),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF30363D)),
+        ),
+        child: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'כיסוי השטח',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            SizedBox(height: 5),
+            _CoverageLegendItem(color: coverageLowColor, label: 'נמוך  1–39%'),
+            _CoverageLegendItem(
+              color: coveragePartialColor,
+              label: 'חלקי  40–74%',
+            ),
+            _CoverageLegendItem(
+              color: coverageGoodColor,
+              label: 'טוב  75–100%',
+            ),
+            _CoverageLegendItem(
+              color: coverageUnsearchedColor,
+              label: 'טרם נסרק  0%',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CoverageLegendItem extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _CoverageLegendItem({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1.5),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white54, width: 0.5),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white, fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CoverageDetailsSheet extends StatelessWidget {
+  final CoverageCell cell;
+
+  const _CoverageDetailsSheet({required this.cell});
+
+  @override
+  Widget build(BuildContext context) {
+    final percent = (cell.cumulativePod.clamp(0.0, 1.0) * 100).round();
+    final (level, color) = switch (percent) {
+      0 => ('טרם נסרק', coverageUnsearchedColor),
+      < 40 => ('כיסוי נמוך', coverageLowColor),
+      < 75 => ('כיסוי חלקי', coveragePartialColor),
+      _ => ('כיסוי טוב', coverageGoodColor),
+    };
+
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          key: const Key('coverage_details_sheet'),
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 14,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    level,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '$percent%',
+                    key: const Key('coverage_percent'),
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              _CoverageDetailRow(
+                icon: Icons.schedule,
+                label: 'סריקה אחרונה',
+                value: _formatCoverageTime(cell.lastContributionAt),
+              ),
+              _CoverageDetailRow(
+                icon: Icons.groups_outlined,
+                label: 'מחפשים שעברו בתא',
+                value: _searcherCount(cell.distinctSearchers),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'מזהה משושה: ${cell.hexId}',
+                textDirection: TextDirection.ltr,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xFF8B949E), fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _formatCoverageTime(DateTime? value) {
+    if (value == null) return 'אין מידע';
+    final local = value.toLocal();
+    String two(int part) => part.toString().padLeft(2, '0');
+    return '${two(local.day)}/${two(local.month)}/${local.year} '
+        '${two(local.hour)}:${two(local.minute)}';
+  }
+
+  static String _searcherCount(int count) => switch (count) {
+    0 => 'אין',
+    1 => 'מחפש אחד',
+    _ => '$count מחפשים',
+  };
+}
+
+class _CoverageDetailRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+
+  const _CoverageDetailRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          Icon(icon, color: const Color(0xFF8B949E), size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(color: Color(0xFF8B949E), fontSize: 13),
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MapNotice extends StatelessWidget {
   final String text;
   const _MapNotice(this.text);
@@ -368,7 +628,10 @@ class _OverflowMenu extends ConsumerWidget {
     // than shown with the role in brackets as a warning.
     final permissions = ref
         .watch(sectorPermissionsProvider)
-        .maybeWhen(data: (value) => value, orElse: () => SectorPermissions.none);
+        .maybeWhen(
+          data: (value) => value,
+          orElse: () => SectorPermissions.none,
+        );
 
     return Container(
       decoration: const BoxDecoration(

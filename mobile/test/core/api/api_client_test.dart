@@ -534,7 +534,8 @@ void main() {
           'hexes': [
             {
               'hex_id': '8c2db2b25155dff',
-              'cumulative_pod': 0.64,
+              // Production FastAPI encodes Decimal as a JSON string.
+              'cumulative_pod': '0.64',
               'valid_contributions': 2,
               'distinct_searchers': 2,
               'last_contribution_at': '2030-01-01T00:00:00Z',
@@ -545,6 +546,7 @@ void main() {
               ],
             },
           ],
+          'server_time': '2030-01-01T02:00:00Z',
         }, 200);
       });
 
@@ -557,8 +559,10 @@ void main() {
       expect(captured!.headers['authorization'], 'Bearer acct-tok');
       expect(result.resolution, 12);
       expect(result.cells.single.hexId, '8c2db2b25155dff');
+      expect(result.cells.single.cumulativePod, 0.64);
       expect(result.cells.single.boundary.first.latitude, 31.7);
       expect(result.cells.single.boundary.first.longitude, 35.2);
+      expect(result.serverTime, DateTime.parse('2030-01-01T02:00:00Z'));
     });
   });
 

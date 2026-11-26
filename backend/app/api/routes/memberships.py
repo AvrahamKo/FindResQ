@@ -37,6 +37,7 @@ from ..schemas.memberships import (
     JoinRequest,
     JoinResponse,
     MembershipOut,
+    MembershipUpdate,
     SessionIssueResponse,
 )
 from ...errors import Conflict, Forbidden, NotFound, Unauthorized, ValidationFailed
@@ -46,6 +47,7 @@ from ...repositories import join_codes as join_codes_repo
 from ...repositories import memberships as memberships_repo
 from ...repositories import sector_keys as sector_keys_repo
 from ...repositories import sectors as sectors_repo
+from ...repositories import track_points as track_points_repo
 from ...security import envelope
 from ...security.tokens import issue_session_token
 
@@ -59,6 +61,15 @@ def _membership_to_out(m: memberships_repo.Membership) -> MembershipOut:
 
 
 # --- Join codes --------------------------------------------------------------
+
+
+@router.get("/sectors/{sector_id}/join-codes", response_model=list[JoinCodeOut])
+async def list_join_codes(
+    sector_id: uuid.UUID, user: CurrentUser, conn: ConnDep
+) -> list[JoinCodeOut]:
+    await require_lead_or_commander(conn, sector_id, user)
+    rows = await join_codes_repo.list_active(conn, sector_id)
+    return [JoinCodeOut(**asdict(code)) for code in rows]
 
 
 @router.post(
@@ -291,6 +302,52 @@ async def revoke_membership(
 
     logger.info("membership revoked id=%s by=%s", membership_id, user.id)
     return _membership_to_out(membership)
+
+
+@router.patch("/memberships/{membership_id}", response_model=MembershipOut)
+async def update_membership(
+    membership_id: uuid.UUID,
+    payload: MembershipUpdate,
+    user: CurrentUser,
+    conn: ConnDep,
+) -> MembershipOut:
+    """Edits operational properties without rewriting membership history.
+
+    Changing walker/vehicle mode affects plausibility checks and the search
+    swath radius. If an approved searcher already has an open segment, close
+    it first so subsequent points begin a clean segment under the new mode.
+    """
+    existing = await memberships_repo.get(conn, membership_id)
+    if existing is None:
+        raise NotFound("membership not found")
+    await require_lead_or_commander(conn, existing.sector_id, user)
+
+    if existing.status not in memberships_repo.LIVE_STATUSES:
+        raise Conflict("only pending or approved memberships can be edited")
+    if existing.movement_mode == payload.movement_mode:
+        return _membership_to_out(existing)
+
+    async with conn.transaction():
+        if existing.status == "approved":
+            open_segment = await track_points_repo.get_open_segment_tail(
+                conn, existing.device_id
+            )
+            if open_segment is not None:
+                await track_points_repo.close_segment(conn, open_segment.segment_id)
+        updated = await memberships_repo.update_movement_mode(
+            conn, membership_id, payload.movement_mode
+        )
+        if updated is None:
+            raise Conflict("membership is no longer editable")
+
+    logger.info(
+        "membership movement mode changed id=%s from=%s to=%s by=%s",
+        membership_id,
+        existing.movement_mode,
+        payload.movement_mode,
+        user.id,
+    )
+    return _membership_to_out(updated)
 
 
 # --- Session claim -----------------------------------------------------------

@@ -189,6 +189,23 @@ final ingestSyncControllerProvider =
       );
     });
 
+/// How often the active field map refreshes the team's H3 coverage cells.
+///
+/// An ingest by this handset already triggers an immediate refresh, but that
+/// signal cannot reveal ground scanned by a different handset. A modest poll
+/// keeps the honeycomb aligned with the Commander dashboard without holding
+/// a WebSocket or keeping the radio continuously awake. Null disables it.
+final coveragePollIntervalProvider = Provider<Duration?>(
+  (ref) => const Duration(seconds: 90),
+);
+
+/// Controlled by the active map: false on the personal layer and whenever
+/// Android backgrounds the activity. This cancels the timer rather than
+/// merely letting it wake up and decide not to make a request.
+final coveragePollingEnabledProvider = StateProvider.autoDispose<bool>(
+  (ref) => true,
+);
+
 final coverageControllerProvider =
     StateNotifierProvider.autoDispose<CoverageController, CoverageMapState>((
       ref,
@@ -199,12 +216,32 @@ final coverageControllerProvider =
         mapStore: ref.watch(searchMapStoreProvider),
       );
       unawaited(controller.start());
+
+      final interval = ref.watch(coveragePollIntervalProvider);
+      Timer? timer;
+      ref.listen<bool>(coveragePollingEnabledProvider, (previous, enabled) {
+        timer?.cancel();
+        timer = null;
+        if (!enabled || interval == null) return;
+
+        // Switching back to Team/foreground should catch up immediately;
+        // the initial true value is already covered by controller.start().
+        if (previous == false) unawaited(controller.refresh());
+        timer = Timer.periodic(
+          interval,
+          (_) => unawaited(controller.refresh()),
+        );
+      }, fireImmediately: true);
+      ref.onDispose(() => timer?.cancel());
+
       ref.listen<DateTime?>(
         ingestSyncControllerProvider.select(
           (sync) => sync is SyncActive ? sync.lastSyncAt : null,
         ),
         (previous, next) {
-          if (next != null && next != previous) {
+          if (next != null &&
+              next != previous &&
+              ref.read(coveragePollingEnabledProvider)) {
             unawaited(controller.refresh());
           }
         },

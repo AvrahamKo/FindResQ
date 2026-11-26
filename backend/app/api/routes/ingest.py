@@ -53,7 +53,10 @@ async def ingest(
             device_wire_id=device.wire_id,
             device_public_key=device.ed25519_public_key,
             user_id=session.claims.user_id,
-            movement_mode=session.claims.movement_mode,
+            # Operational mode is live membership state, not a stale JWT
+            # snapshot. A Lead may correct walker/vehicle from the dashboard
+            # while the search is active; that edit closes the prior segment.
+            movement_mode=session.membership.movement_mode,
             sector_key=sector_key,
             blobs=blobs,
         )

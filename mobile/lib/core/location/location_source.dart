@@ -5,6 +5,7 @@
 /// tests supply a fake stream.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'location_sample.dart';
@@ -62,10 +63,27 @@ class GeolocatorLocationSource implements LocationSource {
 
   @override
   Stream<LocationSample> watch(SamplingTier tier) {
-    final settings = LocationSettings(
-      accuracy: _toGeolocatorAccuracy(tier.accuracyHint),
-      distanceFilter: tier.distanceFilterM.round(),
-    );
+    final accuracy = _toGeolocatorAccuracy(tier.accuracyHint);
+    final distanceFilter = tier.distanceFilterM.round();
+    final LocationSettings settings =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android
+        ? AndroidSettings(
+            accuracy: accuracy,
+            distanceFilter: distanceFilter,
+            foregroundNotificationConfig:
+                const ForegroundNotificationConfig(
+                  notificationTitle: 'FindResQ tracking active',
+                  notificationText:
+                      'Your location is being recorded for the active search.',
+                  notificationChannelName: 'Active search tracking',
+                  enableWakeLock: true,
+                  setOngoing: true,
+                ),
+          )
+        : LocationSettings(
+            accuracy: accuracy,
+            distanceFilter: distanceFilter,
+          );
     return Geolocator.getPositionStream(locationSettings: settings).map(
       (position) => LocationSample(
         latitude: position.latitude,

@@ -113,6 +113,7 @@ void main() {
         // outlives the pump and trips the binding's pending-timer
         // assertion. The one-shot initial fetch still runs, so the team
         // layer is exercised exactly as in the field.
+        coveragePollIntervalProvider.overrideWithValue(null),
         teamTracksPollIntervalProvider.overrideWithValue(null),
         keyValueStoreProvider.overrideWith((ref) => InMemoryKeyValueStore()),
         locationSourceProvider.overrideWithValue(FakeLocationSource()),
@@ -159,10 +160,11 @@ void main() {
                 return _json({
                   'sector_id': 's1',
                   'resolution': 12,
+                  'server_time': '2030-01-01T00:00:01Z',
                   'hexes': [
                     {
                       'hex_id': '8c2db2b25155dff',
-                      'cumulative_pod': 0.64,
+                      'cumulative_pod': '0.64',
                       'valid_contributions': 2,
                       'distinct_searchers': 2,
                       'last_contribution_at': '2030-01-01T00:00:00Z',
@@ -376,17 +378,37 @@ void main() {
 
     expect(requestedPaths.contains('/sectors/s1/hexes'), isTrue);
     expect(find.byKey(const Key('coverage_layer_toggle')), findsOneWidget);
+    expect(find.byKey(const Key('coverage_legend')), findsOneWidget);
+    expect(find.text('נמוך  1–39%'), findsOneWidget);
+    expect(find.text('חלקי  40–74%'), findsOneWidget);
+    expect(find.text('טוב  75–100%'), findsOneWidget);
+    expect(find.text('טרם נסרק  0%'), findsOneWidget);
     expect(find.text('Team'), findsOneWidget);
     expect(find.text('Mine'), findsOneWidget);
 
     var map = tester.widget<SectorMapView>(find.byType(SectorMapView));
     expect(map.teamCoverage, hasLength(1));
     expect(map.coverageLayer, SearchCoverageLayer.team);
+    expect(container.read(coveragePollingEnabledProvider), isTrue);
+
+    map.onCoverageCellTap!(map.teamCoverage.single);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('coverage_details_sheet')), findsOneWidget);
+    expect(find.byKey(const Key('coverage_percent')), findsOneWidget);
+    expect(find.text('64%'), findsOneWidget);
+    expect(find.text('כיסוי חלקי'), findsOneWidget);
+    expect(find.text('2 מחפשים'), findsOneWidget);
+    expect(find.textContaining('01/01/2030'), findsOneWidget);
+
+    Navigator.of(tester.element(find.byType(SectorMapView))).pop();
+    await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('coverage_mine')));
     await tester.pump();
     map = tester.widget<SectorMapView>(find.byType(SectorMapView));
     expect(map.coverageLayer, SearchCoverageLayer.mine);
+    expect(find.byKey(const Key('coverage_legend')), findsNothing);
+    expect(container.read(coveragePollingEnabledProvider), isFalse);
   });
 
   testWidgets('shows the most recent server synchronization time', (
@@ -398,6 +420,19 @@ void main() {
     expect(find.byKey(const Key('last_server_sync')), findsOneWidget);
     expect(find.textContaining('Last sync:'), findsOneWidget);
     expect(find.text('Last sync: never'), findsNothing);
+  });
+
+  testWidgets('coverage legend fits a narrow Android screen', (tester) async {
+    tester.view.physicalSize = const Size(412, 915);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('coverage_legend')), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   group('team scan paths', () {

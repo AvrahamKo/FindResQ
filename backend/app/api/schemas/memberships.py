@@ -57,6 +57,15 @@ class MembershipOut(BaseModel):
     battery_at_join: int | None
     powerbank_attested: bool
     created_at: datetime
+    # Populated on leadership roster/list responses. Kept optional because
+    # the volunteer-facing single-membership endpoint does not need to expose
+    # a second copy of data the caller already owns.
+    display_name: str | None = None
+    phone_e164: str | None = None
+
+
+class MembershipUpdate(BaseModel):
+    movement_mode: MovementMode
 
 
 class SessionIssueResponse(BaseModel):

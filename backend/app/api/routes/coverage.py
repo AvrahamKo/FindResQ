@@ -60,11 +60,22 @@ async def get_sector_coverage(
     newest `last_contribution_at`/timestamp it has already rendered instead
     of re-fetching every hex in the sector on each refresh."""
     swe = await _require_sector_visibility(conn, sector_id, user)
-    rows = await hex_contrib_repo.get_coverage_for_sector(conn, sector_id, since)
+    # Capture PostgreSQL's time BEFORE the delta query and cap the query at
+    # that checkpoint. A row updated concurrently after this instant is then
+    # guaranteed to appear in the next request instead of falling into a
+    # query/checkpoint race window.
+    server_time = await conn.fetchval("SELECT now()")
+    rows = await hex_contrib_repo.get_coverage_for_sector(
+        conn,
+        sector_id,
+        since,
+        until=server_time,
+    )
     return CoverageResponse(
         sector_id=sector_id,
         resolution=swe.sector.h3_resolution,
         hexes=[HexCoverageOut(**asdict(row)) for row in rows],
+        server_time=server_time,
     )
 
 

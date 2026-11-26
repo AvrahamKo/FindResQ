@@ -238,9 +238,13 @@ class ApiClient {
   Future<CoverageSnapshot> getSectorCoverage({
     required String accountToken,
     required String sectorId,
+    DateTime? since,
   }) async {
+    final query = since == null
+        ? ''
+        : '?since=${Uri.encodeQueryComponent(since.toUtc().toIso8601String())}';
     final response = await _get(
-      '/sectors/$sectorId/hexes',
+      '/sectors/$sectorId/hexes$query',
       bearerToken: accountToken,
     );
     return CoverageSnapshot.fromJson(_decodeObject(response));

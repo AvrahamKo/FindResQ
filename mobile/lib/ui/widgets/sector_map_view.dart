@@ -7,6 +7,47 @@ import '../../core/storage/search_map_store.dart';
 
 enum SearchCoverageLayer { team, mine }
 
+const coverageLowColor = Color(0xFFE74C3C);
+const coveragePartialColor = Color(0xFFF1C40F);
+const coverageGoodColor = Color(0xFF2ECC71);
+const coverageUnsearchedColor = Color(0xFF6E7681);
+
+/// The same unambiguous bands used by the field legend. Zero is reserved for
+/// a cell whose contributions were invalidated, which is operationally the
+/// same as unsearched ground.
+Color coveragePodColor(double pod) {
+  final value = pod.clamp(0.0, 1.0);
+  if (value <= 0) return coverageUnsearchedColor;
+  if (value < 0.4) return coverageLowColor;
+  if (value < 0.75) return coveragePartialColor;
+  return coverageGoodColor;
+}
+
+/// Finds the coverage cell under a geographical tap. H3 cells do not overlap,
+/// so returning the first match is deterministic. Kept outside the widget so
+/// the coordinate order can be tested without a map renderer.
+CoverageCell? coverageCellAt(List<CoverageCell> cells, LatLng point) {
+  for (final cell in cells) {
+    final ring = cell.boundary;
+    if (ring.length < 3) continue;
+
+    var inside = false;
+    for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      final xi = ring[i].longitude;
+      final yi = ring[i].latitude;
+      final xj = ring[j].longitude;
+      final yj = ring[j].latitude;
+      final crossesLatitude = (yi > point.latitude) != (yj > point.latitude);
+      if (!crossesLatitude) continue;
+      final boundaryLongitude =
+          (xj - xi) * (point.latitude - yi) / (yj - yi) + xi;
+      if (point.longitude < boundaryLongitude) inside = !inside;
+    }
+    if (inside) return cell;
+  }
+  return null;
+}
+
 /// Tactical map: the sector boundary plus the searcher's own position.
 ///
 /// [showBasemap] is false in widget tests and is ALSO the honest offline
@@ -30,6 +71,7 @@ class SectorMapView extends StatefulWidget {
 
   final List<PersonalTrackPoint> personalTrail;
   final SearchCoverageLayer coverageLayer;
+  final ValueChanged<CoverageCell>? onCoverageCellTap;
 
   const SectorMapView({
     super.key,
@@ -42,6 +84,7 @@ class SectorMapView extends StatefulWidget {
     this.teamTracks = const [],
     this.personalTrail = const [],
     this.coverageLayer = SearchCoverageLayer.team,
+    this.onCoverageCellTap,
   });
 
   @override
@@ -59,11 +102,6 @@ class _SectorMapViewState extends State<SectorMapView> {
   LatLng? get _position => widget.latitude != null && widget.longitude != null
       ? LatLng(widget.latitude!, widget.longitude!)
       : null;
-
-  Color _podColor(double pod) {
-    final value = pod.clamp(0.0, 1.0);
-    return Color.lerp(const Color(0xFFE74C3C), const Color(0xFF2ECC71), value)!;
-  }
 
   /// A stable colour per teammate, so the same person keeps the same line
   /// across polls and app restarts. Derived from the user id rather than
@@ -155,12 +193,17 @@ class _SectorMapViewState extends State<SectorMapView> {
               InteractiveFlag.drag |
               InteractiveFlag.doubleTapZoom,
         ),
+        onTap: (_, point) {
+          if (widget.coverageLayer != SearchCoverageLayer.team) return;
+          final cell = coverageCellAt(widget.teamCoverage, point);
+          if (cell != null) widget.onCoverageCellTap?.call(cell);
+        },
       ),
       children: [
         if (widget.showBasemap)
           TileLayer(
             urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-            userAgentPackageName: 'com.lifesearch.mobile',
+            userAgentPackageName: 'com.lifesearch.lifesearch_mobile',
           ),
         if (widget.coverageLayer == SearchCoverageLayer.team &&
             widget.teamCoverage.isNotEmpty)
@@ -172,9 +215,9 @@ class _SectorMapViewState extends State<SectorMapView> {
                     points: cell.boundary
                         .map((point) => LatLng(point.latitude, point.longitude))
                         .toList(growable: false),
-                    borderColor: _podColor(cell.cumulativePod),
+                    borderColor: coveragePodColor(cell.cumulativePod),
                     borderStrokeWidth: 1,
-                    color: _podColor(
+                    color: coveragePodColor(
                       cell.cumulativePod,
                     ).withValues(alpha: 0.48),
                   ),

@@ -59,6 +59,7 @@ class ActiveSession:
 
     claims: SessionClaims
     sector: sectors_repo.Sector
+    membership: memberships_repo.Membership
 
 
 async def current_membership(
@@ -91,6 +92,12 @@ async def current_membership(
     membership = await memberships_repo.get(conn, claims.membership_id)
     if membership is None or membership.status != "approved":
         raise Unauthorized("session is no longer valid")
+    if (
+        membership.user_id != claims.user_id
+        or membership.device_id != claims.device_id
+        or membership.sector_id != claims.sector_id
+    ):
+        raise Unauthorized("session no longer matches its membership")
 
     now = datetime.now(timezone.utc)
     if membership.session_expires_at is not None and membership.session_expires_at <= now:
@@ -103,7 +110,7 @@ async def current_membership(
     if sector.key_epoch != claims.key_epoch:
         raise Unauthorized("session key has been rotated; re-join required")
 
-    return ActiveSession(claims=claims, sector=sector)
+    return ActiveSession(claims=claims, sector=sector, membership=membership)
 
 
 CurrentSession = Annotated[ActiveSession, Depends(current_membership)]

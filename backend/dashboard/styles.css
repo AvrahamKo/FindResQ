@@ -56,6 +56,14 @@ input {
   padding: 8px 10px;
 }
 
+select {
+  background: #0d1117;
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 5px 8px;
+}
+
 a { color: var(--accent); }
 
 .centered-form {
@@ -205,18 +213,21 @@ a { color: var(--accent); }
   padding: 10px; margin-bottom: 8px; font-size: 13px;
 }
 .member-head { display: flex; align-items: center; gap: 8px; }
-.member-id {
-  font-family: "SFMono-Regular", Consolas, monospace;
-  flex: 1;
-}
+.member-name { flex: 1; font-weight: 700; word-break: break-word; }
+.member-contact { color: var(--text); font-size: 12px; margin-top: 3px; }
 .lead-badge {
   background: rgba(63, 169, 245, 0.18); color: var(--accent);
   font-size: 9px; font-weight: 800; letter-spacing: 0.08em;
   padding: 2px 6px; border-radius: 3px;
 }
 .member-card .meta { color: var(--text-dim); font-size: 11px; margin: 4px 0 8px; }
-.member-card .actions { display: flex; gap: 6px; }
+.member-card .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .member-card .actions button { padding: 3px 10px; font-size: 11px; }
+.member-mode {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 7px 0 9px; font-size: 11px; color: var(--text-dim);
+}
+.member-mode select { min-width: 105px; font-size: 12px; }
 
 .join-code-badge {
   font-family: "SFMono-Regular", Consolas, monospace;
@@ -229,7 +240,11 @@ a { color: var(--accent); }
   padding: 2px 8px;
   color: var(--ok);
 }
-/* flex-basis forces its own line under the code+revoke row */
+.join-code-row {
+  flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap;
+  gap: 6px; padding: 7px; background: #1f2732;
+  border: 1px solid var(--panel-border); border-radius: 5px;
+}
 .join-code-meta { flex-basis: 100%; font-size: 10px; color: var(--text-dim); }
 
 #map { width: 100%; height: 100%; background: #0a0e14; }
@@ -381,3 +396,57 @@ button.needs-attention {
 /* Vertex handles must stay grabbable, not inherit the crosshair used while
    placing new points. */
 .leaflet-interactive.leaflet-marker-icon { cursor: grab; }
+
+/* ---- Tablet / Android browser layout ----------------------------------
+   The desktop dashboard is a three-column command-post view. On a narrow
+   screen those fixed 260px/320px rails left almost no map and pushed controls
+   off-screen. Stack the same DOM in a touch-friendly order: sectors, map,
+   selected-sector management. */
+@media (max-width: 900px) {
+  html, body, #app { height: auto; min-height: 100%; }
+  body { overflow-y: auto; }
+  .top-bar {
+    height: auto; min-height: 52px; flex-wrap: wrap; gap: 8px;
+    padding: 8px 10px; position: sticky; top: 0; z-index: 1500;
+  }
+  .top-bar .title { flex: 1; min-width: 140px; }
+  .top-bar .spacer { display: none; }
+  .dashboard {
+    display: grid; grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(360px, 55vh) auto;
+    height: auto; min-height: calc(100vh - 52px);
+  }
+  .side-panel {
+    overflow: visible; border-right: none;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .side-panel.right {
+    border-left: none; border-top: 1px solid var(--panel-border);
+  }
+  /* On phones the legend pushed the tactical map more than half a screen
+     below the sector selector. The map already labels its interactive pins;
+     keep the full legend in the command-post layout where space permits. */
+  .legend-heading, #legend { display: none; }
+  #map { height: 55vh; min-height: 360px; }
+  button { min-height: 40px; }
+  .sector-row { min-height: 42px; }
+  .member-card .actions button, .alert-card .actions button,
+  #recruit-control button, #joincode-control button, #boundary-control button {
+    min-height: 38px; padding-left: 12px; padding-right: 12px;
+  }
+}
+
+@media (max-width: 520px) {
+  .top-bar .title { order: -1; flex-basis: 100%; }
+  .top-bar #conn-label { display: none; }
+  .card { min-width: 0; width: calc(100vw - 24px); padding: 20px; }
+  .events-page { margin-top: 18px; }
+  .new-event-form { flex-direction: column; }
+  .event-row { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
+  .event-row .status { margin-left: 0; }
+  .event-row button.danger { margin-left: auto; }
+  #map { height: 48vh; min-height: 320px; }
+  .modal-overlay { padding: 8px; }
+  .field-row { flex-direction: column; gap: 4px; }
+  .field-label { width: auto; }
+}

@@ -56,7 +56,7 @@ async def real_conn():
 async def _make_user(conn, name: str) -> uuid.UUID:
     return await conn.fetchval(
         "INSERT INTO users (phone_e164, display_name) VALUES ($1, $2) RETURNING id",
-        f"+1555{uuid.uuid4().int % 10_000_000:07d}",
+        f"+1555{uuid.uuid4().int % 10_000_000_000:010d}",
         name,
     )
 

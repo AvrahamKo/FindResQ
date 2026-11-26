@@ -246,7 +246,10 @@ class CoverageCell {
 
   factory CoverageCell.fromJson(Map<String, dynamic> json) => CoverageCell(
     hexId: json['hex_id'] as String,
-    cumulativePod: (json['cumulative_pod'] as num).toDouble(),
+    // FastAPI deliberately serializes Decimal as a JSON string to preserve
+    // precision. Accept both that production representation and numeric
+    // fixtures/older servers.
+    cumulativePod: _wireDouble(json['cumulative_pod'], 'cumulative_pod'),
     distinctSearchers: json['distinct_searchers'] as int,
     lastContributionAt: json['last_contribution_at'] == null
         ? null
@@ -280,11 +283,13 @@ class CoverageSnapshot {
   final String sectorId;
   final int resolution;
   final List<CoverageCell> cells;
+  final DateTime? serverTime;
 
   const CoverageSnapshot({
     required this.sectorId,
     required this.resolution,
     required this.cells,
+    this.serverTime,
   });
 
   factory CoverageSnapshot.fromJson(Map<String, dynamic> json) =>
@@ -294,13 +299,26 @@ class CoverageSnapshot {
         cells: (json['hexes'] as List<dynamic>? ?? const [])
             .map((item) => CoverageCell.fromJson(item as Map<String, dynamic>))
             .toList(growable: false),
+        serverTime: json['server_time'] == null
+            ? null
+            : DateTime.parse(json['server_time'] as String),
       );
 
   Map<String, dynamic> toJson() => {
     'sector_id': sectorId,
     'resolution': resolution,
     'hexes': cells.map((cell) => cell.toJson()).toList(growable: false),
+    if (serverTime != null) 'server_time': serverTime!.toIso8601String(),
   };
+}
+
+double _wireDouble(Object? value, String field) {
+  if (value is num) return value.toDouble();
+  if (value is String) {
+    final parsed = double.tryParse(value);
+    if (parsed != null) return parsed;
+  }
+  throw FormatException('$field must be a number, got ${value.runtimeType}');
 }
 
 /// One teammate's continuous traverse, as a drawable polyline.

@@ -41,6 +41,10 @@ class CoverageResponse(BaseModel):
     sector_id: uuid.UUID
     resolution: int
     hexes: list[HexCoverageOut]
+    # Clients pass this database-sourced checkpoint back as `since`. Using
+    # the server clock avoids gaps caused by a field handset whose clock is
+    # ahead or behind PostgreSQL.
+    server_time: datetime
 
 
 class ContributorOut(BaseModel):

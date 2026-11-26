@@ -39,7 +39,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
         <div class="draw-controls" id="draw-controls">
           <button class="secondary" id="new-sector-btn">+ New sector</button>
         </div>
-        <h2>Legend</h2>
+        <h2 class="legend-heading">Legend</h2>
         <div id="legend"></div>
       </div>
       <div id="map"></div>
@@ -63,7 +63,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   const sosAlerts = new Map(); // alertId -> { alert, sectorId }
   const pendingReports = new Map(); // reportId -> { report, sectorId }
   const membershipsBySector = new Map(); // sectorId -> MembershipOut[] (all statuses)
-  const joinCodes = new Map(); // sectorId -> JoinCodeOut (only ones created THIS session -- see api.js)
+  const joinCodes = new Map(); // sectorId -> active JoinCodeOut[] (server-backed)
 
   let selectedSectorId = null;
   let event = null;
@@ -74,6 +74,15 @@ export async function renderDashboard(root, { eventId, onLogout }) {
   function sectorName(sectorId) {
     const s = sectors.get(sectorId);
     return s ? s.name : sectorId.slice(0, 8);
+  }
+
+  function memberName(membership) {
+    return membership.display_name || `Searcher ${membership.user_id.slice(0, 8)}`;
+  }
+
+  function memberIdentity(membership) {
+    const phone = membership.phone_e164 ? ` · ${membership.phone_e164}` : "";
+    return `${memberName(membership)}${phone}`;
   }
 
   function membershipsFor(sectorId) {
@@ -121,6 +130,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     // The roster is the one thing the overview never loads eagerly, so pull
     // it fresh on open rather than waiting up to 5s for the next poll tick.
     refreshMemberships(sectorId);
+    refreshJoinCodes(sectorId);
   }
 
   function clearSelection() {
@@ -282,61 +292,91 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     const sector = sectors.get(selectedSectorId);
     if (!sector) return;
 
-    const entry = joinCodes.get(sector.id);
-    const expired = entry && new Date(entry.expires_at) <= new Date();
-    if (expired) joinCodes.delete(sector.id);
+    const now = new Date();
+    const entries = (joinCodes.get(sector.id) || []).filter(
+      (entry) =>
+        new Date(entry.expires_at) > now &&
+        (entry.max_uses == null || entry.uses < entry.max_uses),
+    );
+    joinCodes.set(sector.id, entries);
 
     el.innerHTML = "";
 
-    if (!entry || expired) {
-      const btn = document.createElement("button");
-      btn.className = "secondary";
-      btn.textContent = "Generate join code";
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        try {
-          joinCodes.set(sector.id, await api.createJoinCode(sector.id));
-          renderJoinCodeControl();
-        } catch (e) {
-          showError(e);
-          btn.disabled = false;
-        }
-      });
-      el.appendChild(btn);
+    const generateBtn = document.createElement("button");
+    generateBtn.className = "secondary";
+    generateBtn.textContent = "+ New join code";
+    generateBtn.addEventListener("click", async () => {
+      generateBtn.disabled = true;
+      try {
+        await api.createJoinCode(sector.id);
+        joinCodes.set(sector.id, await api.listJoinCodes(sector.id));
+        renderJoinCodeControl();
+      } catch (e) {
+        showError(e);
+        generateBtn.disabled = false;
+      }
+    });
+    el.appendChild(generateBtn);
+
+    if (entries.length === 0) {
       const hint = document.createElement("div");
       hint.className = "panel-hint";
-      // There is no GET for join codes -- see api.js.
-      hint.textContent = "Codes are only visible in the session that created them.";
+      hint.textContent = "No active code. Create one and send it to searchers.";
       el.appendChild(hint);
       return;
     }
 
-    const badge = document.createElement("span");
-    badge.className = "join-code-badge";
-    badge.textContent = entry.code;
-    el.appendChild(badge);
+    for (const entry of entries) {
+      const row = document.createElement("div");
+      row.className = "join-code-row";
 
-    const revokeBtn = document.createElement("button");
-    revokeBtn.className = "secondary";
-    revokeBtn.textContent = "Revoke";
-    revokeBtn.addEventListener("click", async () => {
-      revokeBtn.disabled = true;
-      try {
-        await api.revokeJoinCode(sector.id, entry.code);
-        joinCodes.delete(sector.id);
-        renderJoinCodeControl();
-      } catch (e) {
-        showError(e);
-        revokeBtn.disabled = false;
-      }
-    });
-    el.appendChild(revokeBtn);
+      const badge = document.createElement("span");
+      badge.className = "join-code-badge";
+      badge.textContent = entry.code;
+      row.appendChild(badge);
 
-    const meta = document.createElement("div");
-    meta.className = "join-code-meta";
-    const usesLabel = entry.max_uses ? `${entry.uses}/${entry.max_uses} uses` : `${entry.uses} used`;
-    meta.textContent = `${usesLabel} · expires ${new Date(entry.expires_at).toLocaleTimeString()}`;
-    el.appendChild(meta);
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "secondary";
+      copyBtn.textContent = "Copy";
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(entry.code);
+          copyBtn.textContent = "Copied";
+          setTimeout(() => { copyBtn.textContent = "Copy"; }, 1400);
+        } catch (_) {
+          prompt("Copy this join code", entry.code);
+        }
+      });
+      row.appendChild(copyBtn);
+
+      const revokeBtn = document.createElement("button");
+      revokeBtn.className = "secondary";
+      revokeBtn.textContent = "Revoke";
+      revokeBtn.addEventListener("click", async () => {
+        revokeBtn.disabled = true;
+        try {
+          await api.revokeJoinCode(sector.id, entry.code);
+          joinCodes.set(
+            sector.id,
+            (joinCodes.get(sector.id) || []).filter((item) => item.code !== entry.code),
+          );
+          renderJoinCodeControl();
+        } catch (e) {
+          showError(e);
+          revokeBtn.disabled = false;
+        }
+      });
+      row.appendChild(revokeBtn);
+
+      const meta = document.createElement("div");
+      meta.className = "join-code-meta";
+      const usesLabel = entry.max_uses
+        ? `${entry.uses}/${entry.max_uses} uses`
+        : `${entry.uses} used`;
+      meta.textContent = `${usesLabel} · expires ${new Date(entry.expires_at).toLocaleString()}`;
+      row.appendChild(meta);
+      el.appendChild(row);
+    }
   }
 
   // ---------- sector panel: members roster ----------
@@ -360,12 +400,32 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       card.className = "member-card";
       card.innerHTML = `
         <div class="member-head">
-          <span class="member-id">${m.user_id.slice(0, 8)}</span>
+          <span class="member-name">${escapeHtml(memberName(m))}</span>
           ${isLead ? '<span class="lead-badge">LEAD</span>' : ""}
         </div>
-        <div class="meta">${m.movement_mode}${m.battery_at_join != null ? ` · joined at ${m.battery_at_join}%` : ""}</div>
+        <div class="member-contact">${escapeHtml(m.phone_e164 || "No phone available")}</div>
+        <div class="meta">ID ${m.user_id.slice(0, 8)} · ${m.battery_at_join != null ? `joined at ${m.battery_at_join}%` : "battery unknown"}</div>
+        <div class="member-mode"><label>Movement mode</label></div>
         <div class="actions"></div>
       `;
+      const modeControl = card.querySelector(".member-mode");
+      const modeSelect = document.createElement("select");
+      modeSelect.innerHTML = '<option value="walker">Walker</option><option value="vehicle">Vehicle</option>';
+      modeSelect.value = m.movement_mode;
+      modeSelect.title = "Changing mode closes the current track segment and starts the next one with the correct search radius";
+      modeSelect.addEventListener("change", async () => {
+        const previous = m.movement_mode;
+        modeSelect.disabled = true;
+        try {
+          await api.updateMembership(m.id, modeSelect.value);
+          await refreshMemberships(sector.id);
+        } catch (e) {
+          modeSelect.value = previous;
+          modeSelect.disabled = false;
+          showError(e);
+        }
+      });
+      modeControl.appendChild(modeSelect);
       const actions = card.querySelector(".actions");
 
       if (!isLead) {
@@ -404,7 +464,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
       removeBtn.addEventListener("click", async () => {
         if (
           !confirm(
-            `Remove ${m.user_id.slice(0, 8)} from ${sector.name}?\n\n` +
+            `Remove ${memberIdentity(m)} from ${sector.name}?\n\n` +
               "Their session stops working on their next request and any live " +
               "connection is closed immediately. Their recorded scans are kept.\n\n" +
               "They keep the sector key until it is re-keyed, and MAY re-apply " +
@@ -438,7 +498,7 @@ export async function renderDashboard(root, { eventId, onLogout }) {
         removeFromEventBtn.addEventListener("click", async () => {
           if (
             !confirm(
-              `Remove ${m.user_id.slice(0, 8)} from the ENTIRE event?\n\n` +
+              `Remove ${memberIdentity(m)} from the ENTIRE event?\n\n` +
                 "• Every membership they hold, in every sector, is revoked\n" +
                 "• Any Sector Lead role they hold is vacated\n" +
                 "• Their sessions stop working immediately and any live " +
@@ -497,15 +557,13 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     for (const { membership, sectorId } of items) {
       const card = document.createElement("div");
       card.className = "alert-card approval";
-      // No user-lookup endpoint exists server-side -- only the raw user_id
-      // is available, not a display name.
       const battery =
         membership.battery_at_join != null
           ? `${membership.battery_at_join}% battery`
           : "battery unknown";
       card.innerHTML = `
-        <div><strong>${membership.movement_mode}</strong>${selectedSectorId ? "" : ` · ${escapeHtml(sectorName(sectorId))}`}</div>
-        <div class="meta">user ${membership.user_id.slice(0, 8)} · ${battery}${membership.powerbank_attested ? " · powerbank attested" : ""}</div>
+        <div><strong>${escapeHtml(memberName(membership))}</strong>${selectedSectorId ? "" : ` · ${escapeHtml(sectorName(sectorId))}`}</div>
+        <div class="meta">${escapeHtml(membership.phone_e164 || `ID ${membership.user_id.slice(0, 8)}`)} · ${membership.movement_mode} · ${battery}${membership.powerbank_attested ? " · powerbank attested" : ""}</div>
         <div class="actions"></div>
       `;
       const actions = card.querySelector(".actions");
@@ -759,26 +817,38 @@ export async function renderDashboard(root, { eventId, onLogout }) {
     renderMembersRoster();
   }
 
+  async function refreshJoinCodes(sectorId) {
+    try {
+      joinCodes.set(sectorId, await api.listJoinCodes(sectorId));
+    } catch (_) {
+      return; // transient or read-only viewer; keep the last known codes
+    }
+    if (selectedSectorId === sectorId) renderJoinCodeControl();
+  }
+
   async function loadSector(sector) {
     sectors.set(sector.id, sector);
     map.addSector(sector, { onClick: selectSector });
     renderSectorList();
 
-    const [hexes, presence, sos, reports, memberships] = await Promise.all([
+    const [hexes, presence, sos, reports, memberships, activeCodes] = await Promise.all([
       api.getHexes(sector.id).catch(() => ({ hexes: [] })),
       api.getPresence(sector.id).catch(() => []),
       api.getSos(sector.id).catch(() => []),
       api.getReports(sector.id).catch(() => []),
       api.listMemberships(sector.id).catch(() => []),
+      api.listJoinCodes(sector.id).catch(() => []),
     ]);
     map.applyHexes(sector.id, hexes.hexes || hexes);
     map.applyPresence(sector.id, presence);
     membershipsBySector.set(sector.id, memberships);
+    joinCodes.set(sector.id, activeCodes);
     applySosUpdate(sector.id, sos);
     applyReportUpdate(sector.id, reports);
     renderSectorList();
     renderPendingApprovals();
     renderMembersRoster();
+    renderJoinCodeControl();
   }
 
   // ---------- initial load ----------
