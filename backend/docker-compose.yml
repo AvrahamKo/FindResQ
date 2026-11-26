@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: lifesearch
       POSTGRES_DB: lifesearch
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - lifesearch-db-data:/var/lib/postgresql/data
     healthcheck:
